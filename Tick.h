@@ -178,6 +178,61 @@ namespace Tick {
 		}
 	}
 
+	// Post-possession visibility. When the server does NOT crash, the OGS log
+	// otherwise goes silent right after ServerAck, so there is no way to see why
+	// a connected client is stuck on the loading screen. Emit a throttled status
+	// line (~every 3s) covering the match phase, net-connection state, and -- the
+	// key signal -- whether each player controller has a pawn, has ACKNOWLEDGED
+	// that pawn, and finished loading. A client that never enters the world shows
+	// up here as conns=0 (never connected), ackPawn=0 (pawn not acknowledged), or
+	// a phase/warmup counter that never advances.
+	inline void LogJoinDiagnostics(UNetDriver* Driver, AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
+	{
+		float Now = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+		static float NextDiagTime = 0.f;
+		if (Now < NextDiagTime)
+			return;
+		NextDiagTime = Now + 3.f;
+
+		int conns = Driver ? Driver->ClientConnections.Num() : -1;
+
+		char head[256];
+		sprintf_s(head, "[DIAG] phase=%d step=%d players=%d bots=%d conns=%d warmupLeft=%.1f worldReady=%d",
+			(int)GameState->GamePhase, (int)GameState->GamePhaseStep,
+			GameMode->AlivePlayers.Num(), GameMode->AliveBots.Num(),
+			conns, GameState->WarmupCountdownEndTime - Now,
+			GameMode->bWorldIsReady ? 1 : 0);
+		Log(head);
+
+		if (Driver)
+		{
+			for (int i = 0; i < Driver->ClientConnections.Num() && i < 8; i++)
+			{
+				UNetConnection* C = Driver->ClientConnections[i];
+				if (!C)
+					continue;
+				char cl[200];
+				sprintf_s(cl, "[DIAG]   conn[%d]: pc=%d viewTarget=%d",
+					i, C->PlayerController ? 1 : 0, C->ViewTarget ? 1 : 0);
+				Log(cl);
+			}
+		}
+
+		for (int i = 0; i < GameMode->AlivePlayers.Num() && i < 8; i++)
+		{
+			AFortPlayerControllerAthena* PC = GameMode->AlivePlayers[i];
+			if (!PC)
+				continue;
+			bool hasPawn = PC->Pawn != nullptr;
+			bool ackPawn = (PC->Pawn != nullptr) && (PC->AcknowledgedPawn == PC->Pawn);
+			char pl[256];
+			sprintf_s(pl, "[DIAG]   PC[%d]: pawn=%d ackPawn=%d finishedLoading=%d readyToStart=%d",
+				i, hasPawn ? 1 : 0, ackPawn ? 1 : 0,
+				PC->bHasServerFinishedLoading ? 1 : 0, PC->bReadyToStartMatch ? 1 : 0);
+			Log(pl);
+		}
+	}
+
 	inline void (*TickFlushOG)(UNetDriver*, float);
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
@@ -222,6 +277,9 @@ namespace Tick {
 
 		if (!GameState || !GameMode)
 			return TickFlushOG(Driver, DeltaTime);
+
+		if (Driver->ReplicationDriver) // only report the game net driver, not beacons
+			LogJoinDiagnostics(Driver, GameMode, GameState);
 
 		GameMode::KeepWarmupUntilHumanReady(GameMode, GameState, "TickFlush");
 
