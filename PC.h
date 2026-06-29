@@ -235,14 +235,16 @@ namespace PC {
 		if (!Globals::bEventEnabled && !setupWorld) {
 			setupWorld = true;
 			Looting::SpawnFloorLoot();
+			Log("setupWorld: floor loot done");
 
 			Looting::SpawnLlamas();
+			Log("setupWorld: llamas done");
 
 			Vehicles::SpawnVehicles();
+			Log("setupWorld: vehicles done");
 
-			if (true) {
-				PhantomBoothSpawner::SpawnBooths();
-			}
+			PhantomBoothSpawner::SpawnBooths();
+			Log("setupWorld: booths done");
 
 			TArray<AActor*> VendingMachinesArray;
 

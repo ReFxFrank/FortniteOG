@@ -81,6 +81,8 @@ namespace PhantomBoothSpawner {
 
 			if (PhantomBooth) {
 				AActor* SpawnedBooth = SpawnActor<AActor>(Location, Rotation, nullptr, PhantomBooth);
+				if (!SpawnedBooth)
+					continue; // spawn can fail (bad loc/collision); writes to (SpawnedBooth + 0xB0) below would crash on null
 				FGameplayTag FactionTag{};
 				// Remember to shift the index for this if addded or removed from the std::vector
 				if (i >= 12) {

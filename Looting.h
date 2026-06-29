@@ -47,10 +47,14 @@ namespace Looting {
 
             auto Llama = SpawnActor<AFortAthenaSupplyDrop>(GroundLocation, RandomYawRotator, nullptr, MapInfo->LlamaClass.Get());
 
-            Llama->bCanBeDamaged = false;
-
+            // Null-check BEFORE touching the actor: the second spawn can fail
+            // (bad ground location / collision) and return null, in which case
+            // writing bCanBeDamaged would dereference null and crash the server
+            // mid-llama-spawn (right after the "Spawned N Llamas" log).
             if (!Llama)
                 continue;
+
+            Llama->bCanBeDamaged = false;
             LlamasSpawned++;
         }
     }
