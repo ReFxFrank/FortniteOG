@@ -1,0 +1,975 @@
+#pragma once
+#include "framework.h"
+#include "Inventory.h"
+#include "Abilities.h"
+#include "Quests.h"
+#include "Net.h"
+#include "Bots.h"
+#include "Misc.h"
+
+namespace GameMode {
+	inline bool bSetupServerComplete = false;
+	inline bool bUseManualPlayerStart = true;
+
+	inline bool ShouldForceNoAircraftStartup()
+	{
+		return Globals::bSkipUnsafeAircraftPhase && !Globals::LateGame && !Globals::bCreativeEnabled && !Globals::bEventEnabled;
+	}
+
+	namespace Event {
+		static inline UClass* Starter;
+		static inline UObject* JerkyLoader;
+	}
+
+	inline bool IsUnsafePlaylistLevelPath(const std::string& Path)
+	{
+		return Path.contains("Hoagie") || Path.contains("NeoTilted");
+	}
+
+	template <typename LevelArrayType>
+	inline void RemoveUnsafePlaylistLevels(LevelArrayType& Levels, const char* Label)
+	{
+		for (int32 i = Levels.Num() - 1; i >= 0; i--)
+		{
+			std::string Path = UKismetStringLibrary::Conv_NameToString(Levels[i].ObjectID.AssetPathName).ToString();
+			if (IsUnsafePlaylistLevelPath(Path))
+			{
+				Log(std::string("Skipping unsafe playlist ") + Label + " level: " + Path);
+				Levels.Remove(i);
+			}
+		}
+	}
+
+	inline void SanitizePlaylistLevelStreams(UFortPlaylistAthena* Playlist)
+	{
+		if (!Playlist || Globals::bEventEnabled)
+			return;
+
+		if (Globals::Automatics)
+		{
+			if (Playlist->AdditionalLevels.Num() > 0 || Playlist->AdditionalLevelsServerOnly.Num() > 0)
+			{
+				Log("Clearing Automatics playlist additional levels to avoid startup streaming hang.");
+				Playlist->AdditionalLevels.Clear();
+				Playlist->AdditionalLevelsServerOnly.Clear();
+			}
+			return;
+		}
+
+		RemoveUnsafePlaylistLevels(Playlist->AdditionalLevels, "client");
+		RemoveUnsafePlaylistLevels(Playlist->AdditionalLevelsServerOnly, "server");
+	}
+
+	inline bool EnsureServerListening(AFortGameModeAthena* GameMode)
+	{
+		UWorld* World = UWorld::GetWorld();
+		if (!World)
+			return false;
+
+		EnsureGameNetDriverDefinition();
+
+		if (World->NetDriver)
+		{
+			if (GameMode)
+				GameMode->bWorldIsReady = true;
+			return true;
+		}
+
+		FName NetDriverDef = UKismetStringLibrary::Conv_StringToName(FString(L"GameNetDriver"));
+		UNetDriver* NetDriver = CreateNetDriver(UEngine::GetEngine(), World, NetDriverDef);
+		if (!NetDriver)
+		{
+			Log("CreateNetDriver failed; server is not listening yet.");
+			return false;
+		}
+
+		NetDriver->NetDriverName = NetDriverDef;
+		NetDriver->World = World;
+
+		FString Error;
+		FURL Url = FURL();
+		Url.Port = 7777;
+
+		if (!InitListen(NetDriver, World, Url, false, Error))
+		{
+			Log("InitListen failed: " + Error.ToString());
+			return false;
+		}
+
+		SetWorld(NetDriver, World);
+		World->NetDriver = NetDriver;
+		for (size_t i = 0; i < World->LevelCollections.Num(); i++)
+			World->LevelCollections[i].NetDriver = NetDriver;
+		SetWorld(World->NetDriver, World);
+
+		if (GameMode)
+			GameMode->bWorldIsReady = true;
+
+		Log("Listening: 7777");
+		SetConsoleTitleA("OGS 12.41 | Listening: 7777");
+		return true;
+	}
+
+	inline bool HasReadyHumanPlayer(AFortGameModeAthena* GameMode)
+	{
+		if (!GameMode)
+			return false;
+
+		for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
+		{
+			AFortPlayerControllerAthena* PC = GameMode->AlivePlayers[i];
+			if (PC && PC->Pawn && PC->AcknowledgedPawn == PC->Pawn && PC->bHasServerFinishedLoading)
+				return true;
+		}
+
+		return false;
+	}
+
+	inline void HoldWarmupCountdown(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState, float Seconds, const char* Reason)
+	{
+		if (!GameMode || !GameState || GameState->GamePhase != EAthenaGamePhase::Warmup)
+			return;
+
+		float Now = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+		float TargetEndTime = Now + Seconds;
+		if (GameState->WarmupCountdownEndTime >= TargetEndTime)
+			return;
+
+		GameState->WarmupCountdownStartTime = Now;
+		GameState->WarmupCountdownEndTime = TargetEndTime;
+		GameMode->WarmupCountdownDuration = Seconds;
+		GameMode->WarmupEarlyCountdownDuration = Seconds;
+		GameState->ForceNetUpdate();
+
+		std::string Message = "Held warmup countdown";
+		if (Reason && Reason[0])
+			Message += std::string(" during ") + Reason;
+		Message += ".";
+		Log(Message);
+	}
+
+	inline void KeepWarmupUntilHumanReady(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState, const char* Reason)
+	{
+		if (Globals::LateGame || Globals::bCreativeEnabled || HasReadyHumanPlayer(GameMode))
+			return;
+
+		if (GameState && GameState->GamePhase > EAthenaGamePhase::Warmup)
+		{
+			GameState->GamePhase = EAthenaGamePhase::Warmup;
+			GameState->GamePhaseStep = EAthenaGamePhaseStep::Warmup;
+			GameState->bAircraftIsLocked = true;
+			GameState->ForceNetUpdate();
+
+			std::string Message = "Forced game phase back to warmup";
+			if (Reason && Reason[0])
+				Message += std::string(" during ") + Reason;
+			Message += ".";
+			Log(Message);
+		}
+
+		if (GameState && GameState->GamePhase == EAthenaGamePhase::Warmup)
+		{
+			float Now = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+			if (GameState->WarmupCountdownEndTime < Now + 10.f)
+				HoldWarmupCountdown(GameMode, GameState, 30.f, Reason);
+		}
+	}
+
+	inline bool (*ReadyToStartMatchOG)(AFortGameModeAthena* GameMode);
+	inline bool ReadyToStartMatch(AFortGameModeAthena* GameMode)
+	{
+		static bool LoggedSkippedNativeReady = false;
+		if (ReadyToStartMatchOG && !ShouldForceNoAircraftStartup())
+			ReadyToStartMatchOG(GameMode);
+		else if (!LoggedSkippedNativeReady && ShouldForceNoAircraftStartup())
+		{
+			LoggedSkippedNativeReady = true;
+			Log("Skipped native ReadyToStartMatchOG to block aircraft flight path initialization.");
+		}
+
+		static bool SetupServer = false;
+		static bool ServerListening = false;
+
+		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+
+		if (!SetupServer) {
+			static bool LoadedPlaylist = false;
+			if (!LoadedPlaylist) {
+				UFortPlaylistAthena* Playlist = nullptr;
+				if (Globals::bCreativeEnabled) {
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2");
+				}
+				else if (Globals::bEventEnabled) {
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High");
+				}
+				else if (Globals::Arena) {
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Solo.Playlist_ShowdownAlt_Solo");
+				}
+				else if (Globals::Automatics)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Auto/Playlist_DefaultSolo.Playlist_DefaultSolo");
+					if (!Playlist)
+						Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+				}
+				else if (Globals::BattleLab)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/BattleLab/Playlist_BattleLab.Playlist_BattleLab");
+				}
+				else if (Globals::Blitz)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Blitz/Playlist_Blitz_Solo.Playlist_Blitz_Solo");
+				}
+				else if (Globals::StormKing)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/DADBRO/Playlist_DADBRO_Squads.Playlist_DADBRO_Squads");
+				}
+				else if (Globals::Arsenal)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/gg/Playlist_Gg_Reverse.Playlist_Gg_Reverse");
+				}
+				else if (Globals::TeamRumble)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo");
+				}
+				else if (Globals::SolidGold)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/SolidGold/Playlist_SolidGold_Solo.Playlist_SolidGold_Solo");
+				}
+				else if (Globals::UnVaulted)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Unvaulted/Playlist_Unvaulted_Solo.Playlist_Unvaulted_Solo");
+				}
+				else if (Globals::Siphon)
+				{
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Vamp/Playlist_Vamp_Solo.Playlist_Vamp_Solo");
+				}
+				else {
+					Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Playlist_DefaultSquad.Playlist_DefaultSquad");
+					if (!Playlist)
+						Playlist = StaticLoadObject<UFortPlaylistAthena>("/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+				}
+				if (!Playlist) {
+					Log("Could not find playlist!");
+					return false;
+				}
+				else {
+					LoadedPlaylist = true;
+					Log("Found Playlist!");
+				}
+
+				SanitizePlaylistLevelStreams(Playlist);
+				GuardUnsafeStartupLevelStreaming("playlist setup");
+
+				GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
+				GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
+				GameState->CurrentPlaylistInfo.PlaylistReplicationKey++;
+				GameState->CurrentPlaylistInfo.MarkArrayDirty();
+				GameState->OnRep_CurrentPlaylistInfo();
+
+				GameMode->CurrentPlaylistName = Playlist->PlaylistName;
+				GameMode->WarmupRequiredPlayerCount = 1;
+
+				Misc::FirstIdx = Playlist->DefaultFirstTeam;
+				Misc::LastIdx = Playlist->DefaultLastTeam >= Playlist->DefaultFirstTeam ? Playlist->DefaultLastTeam : 102;
+				Misc::NextIdx = Misc::FirstIdx;
+				Misc::MaxPlayersOnTeam = Playlist->MaxSquadSize;
+
+				bool bDBNO = Misc::MaxPlayersOnTeam > 1;
+
+				GameState->bDBNOEnabledForGameMode = bDBNO;
+				GameState->bDBNODeathEnabled = bDBNO;
+
+				GameMode->bAlwaysDBNO = bDBNO;
+				GameMode->bDBNOEnabled = bDBNO;
+
+				GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
+				GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
+				GameState->CurrentPlaylistInfo.PlaylistReplicationKey++;
+				GameState->CurrentPlaylistId = Playlist->PlaylistId;
+				GameState->CurrentPlaylistInfo.MarkArrayDirty();
+
+				GameMode->GameSession->MaxPlayers = Globals::MaxBotsToSpawn + 1;
+				GameMode->GameSession->MaxSpectators = 0;
+				GameMode->GameSession->MaxPartySize = Playlist->MaxSquadSize;
+				GameMode->GameSession->MaxSplitscreensPerConnection = 2;
+				GameMode->GameSession->bRequiresPushToTalk = false;
+				GameMode->GameSession->SessionName = UKismetStringLibrary::Conv_StringToName(FString(L"GameSession"));
+
+				auto TS = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+				auto DR = 90.f;
+
+				GameState->WarmupCountdownEndTime = TS + DR;
+				GameMode->WarmupCountdownDuration = DR;
+				GameState->WarmupCountdownStartTime = TS;
+				GameMode->WarmupEarlyCountdownDuration = DR;
+
+				GameState->CurrentPlaylistId = Playlist->PlaylistId;
+				GameState->OnRep_CurrentPlaylistId();
+
+				if (ShouldForceNoAircraftStartup())
+				{
+					Playlist->bSkipAircraft = true;
+					Playlist->SafeZoneStartUp = ESafeZoneStartUp::StartsWithNoAirCraft;
+					Playlist->AirCraftBehavior = EAirCraftBehavior::NoAircraft;
+					Playlist->AISettings = nullptr;
+				}
+
+				GameState->bGameModeWillSkipAircraft = Playlist->bSkipAircraft;
+				GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
+				GameState->AirCraftBehavior = Playlist->AirCraftBehavior;
+				GameState->OnRep_Aircraft();
+
+				GameState->WorldLevel = Playlist->LootLevel;
+				GameMode->AISettings = ShouldForceNoAircraftStartup() ? nullptr : Playlist->AISettings;
+				GameMode->bFlightPathInitialized = ShouldForceNoAircraftStartup();
+				GameMode->bSpawnAllStuff = true;
+				GameState->DefaultRebootMachineHotfix = 1;
+
+				if (Globals::bEventEnabled) {
+					Log("Event is loaded!");
+
+					TArray<AActor*> BuildingFoundations;
+					UGameplayStatics::GetAllActorsOfClass(UWorld::GetWorld(), ABuildingFoundation::StaticClass(), &BuildingFoundations);
+
+
+					for (AActor*& BuildingFoundation : BuildingFoundations) {
+						ABuildingFoundation* Foundation = (ABuildingFoundation*)BuildingFoundation;
+						if (!Foundation) continue;
+
+						if (BuildingFoundation->GetName().contains("Jerky") ||
+							BuildingFoundation->GetName().contains("LF_Athena_POI_19x19")) {
+							ShowFoundation((ABuildingFoundation*)BuildingFoundation);
+						}
+					}
+
+					BuildingFoundations.Free();
+				}
+				else {
+					Log("Using native building foundation streaming.");
+				}
+
+				Log("Setup Playlist!");
+
+				if (!EnsureServerListening(GameMode))
+					return false;
+			}
+
+			if (!GameState->MapInfo) {
+				GuardUnsafeStartupLevelStreaming("waiting for map info");
+				//Log("Map isnt fully loaded yet, ReadyToStartMatch return false!"); //this spams so why log 
+				return false;
+			}
+
+			static bool InitialisedBots = false;
+
+			if (!InitialisedBots) {
+				if (Globals::bEventEnabled) {
+					InitialisedBots = true;
+				}
+				else if (ShouldForceNoAircraftStartup() || !Globals::bBotsEnabled)
+				{
+					InitialisedBots = true;
+					Globals::bBotsEnabled = false;
+					GameMode->ServerBotManager = nullptr;
+					GameMode->ServerBotManagerClass = nullptr;
+					GameMode->AISettings = nullptr;
+					Log("Skipped native bot manager initialization to avoid aircraft flight path startup.");
+				}
+				else if (auto BotManager = (UFortServerBotManagerAthena*)UGameplayStatics::SpawnObject(UFortServerBotManagerAthena::StaticClass(), GameMode))
+				{
+					InitialisedBots = true;
+
+					GameMode->ServerBotManager = BotManager;
+					GameMode->ServerBotManagerClass = UFortServerBotManagerAthena::StaticClass();
+					BotManager->CachedGameState = GameState;
+					BotManager->CachedGameMode = GameMode;
+
+					if (!GameMode->AIDirector)
+					{
+						Log("No AIDirector; disabling custom bots before spawning bot mutator.");
+						Globals::bBotsEnabled = false;
+					}
+
+					BotMutator = Globals::bBotsEnabled ? SpawnActor<AFortAthenaMutator_Bots>({}) : nullptr;
+					if (Globals::bBotsEnabled && !BotMutator)
+					{
+						Log("BotMutator spawn failed; disabling custom bots.");
+						Globals::bBotsEnabled = false;
+					}
+					else if (BotMutator)
+					{
+						BotManager->CachedBotMutator = BotMutator;
+						BotMutator->CachedGameMode = GameMode;
+						BotMutator->CachedGameState = GameState;
+
+						if (Globals::bBotsEnabled)
+						{
+							AFortAIGoalManager* GoalManager = SpawnActor<AFortAIGoalManager>({});
+							GameMode->AIGoalManager = GoalManager;
+						}
+					}
+
+					if (Globals::bBotsEnabled) {
+						CIDs.clear();
+						for (auto Path : KnownGoodCIDPaths)
+						{
+							UAthenaCharacterItemDefinition* CID = StaticLoadObject<UAthenaCharacterItemDefinition>(Path);
+							if (CID && CID->HeroDefinition)
+								CIDs.push_back(CID);
+						}
+						Pickaxes = GetAllObjectsOfClass<UAthenaPickaxeItemDefinition>();
+						Backpacks = GetAllObjectsOfClass<UAthenaBackpackItemDefinition>();
+						Gliders = GetAllObjectsOfClass<UAthenaGliderItemDefinition>();
+						Contrails = GetAllObjectsOfClass<UAthenaSkyDiveContrailItemDefinition>();
+						Dances = GetAllObjectsOfClass<UAthenaDanceItemDefinition>();
+					}
+
+					Log("Initialised Bots!");
+				}
+				else
+				{
+					Log("BotManager is nullptr!");
+				}
+			}
+
+			if (!ServerListening) {
+				ServerListening = true;
+				GuardUnsafeStartupLevelStreaming("server listen setup");
+
+				if (Globals::bEventEnabled) {
+					Event::Starter = StaticLoadObject<UClass>("/CycloneJerky/Gameplay/BP_Jerky_Scripting.BP_Jerky_Scripting_C");
+					Event::JerkyLoader = UObject::FindObject<UObject>("BP_Jerky_Loader_C JerkyLoaderLevel.JerkyLoaderLevel.PersistentLevel.BP_Jerky_Loader_2");
+				}
+
+				GameState->OnRep_CurrentPlaylistId();
+				GameState->OnRep_CurrentPlaylistInfo();
+
+				if (!GameState->CurrentPlaylistInfo.BasePlaylist) {
+					Log("CurrentPlaylistInfo.BasePlaylist is nullptr, delaying match start.");
+					ServerListening = false;
+					return false;
+				}
+
+				for (int i = 0; i < GameState->CurrentPlaylistInfo.BasePlaylist->AdditionalLevels.Num(); i++)
+				{
+					FVector Loc{};
+					FRotator Rot{};
+					bool bSuccess = false;
+					((ULevelStreamingDynamic*)ULevelStreamingDynamic::StaticClass()->DefaultObject)->LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), GameState->CurrentPlaylistInfo.BasePlaylist->AdditionalLevels[i], Loc, Rot, &bSuccess, FString());
+					FAdditionalLevelStreamed NewLevel{};
+					NewLevel.LevelName = GameState->CurrentPlaylistInfo.BasePlaylist->AdditionalLevels[i].ObjectID.AssetPathName;
+					NewLevel.bIsServerOnly = false;
+					GameState->AdditionalPlaylistLevelsStreamed.Add(NewLevel);
+				}
+
+				for (int i = 0; i < GameState->CurrentPlaylistInfo.BasePlaylist->AdditionalLevelsServerOnly.Num(); i++)
+				{
+					FVector Loc{};
+					FRotator Rot{};
+					bool bSuccess = false;
+					((ULevelStreamingDynamic*)ULevelStreamingDynamic::StaticClass()->DefaultObject)->LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), GameState->CurrentPlaylistInfo.BasePlaylist->AdditionalLevelsServerOnly[i], Loc, Rot, &bSuccess, FString());
+					FAdditionalLevelStreamed NewLevel{};
+					NewLevel.LevelName = GameState->CurrentPlaylistInfo.BasePlaylist->AdditionalLevelsServerOnly[i].ObjectID.AssetPathName;
+					NewLevel.bIsServerOnly = true;
+					GameState->AdditionalPlaylistLevelsStreamed.Add(NewLevel);
+				}
+				GameState->OnRep_AdditionalPlaylistLevelsStreamed();
+				GameState->OnFinishedStreamingAdditionalPlaylistLevel();
+				GameMode->HandleAllPlaylistLevelsVisible();
+
+				if (!EnsureServerListening(GameMode))
+				{
+					ServerListening = false;
+					return false;
+				}
+
+				GuardUnsafeStartupLevelStreaming("setup complete");
+				SetupServer = true;
+				bSetupServerComplete = true;
+			}
+
+			/*if (UWorld::GetWorld()->NetDriver->ClientConnections.Num() > 0) {
+				std::cout << "Return true\n";
+				return true;
+			}*/
+		}
+
+		/*if (GameMode->bDelayedStart)
+		{
+			return false;
+		}*/
+
+		//std::cout << GameMode->GetMatchState().ToString() << "\n";
+
+		/*if (GameMode->GetMatchState().ToString() == "WaitingToStart")
+		{
+			if (GameMode->NumPlayers + GameMode->NumBots > 0)
+			{
+				Log("Enough Players/Bots, Starting match!");
+				return true;
+			}
+		}*/
+
+		if (SetupServer)
+		{
+			bSetupServerComplete = true;
+			return false;
+		}
+
+		return false;
+		//return UWorld::GetWorld()->NetDriver->ClientConnections.Num() > 0;
+	}
+
+	inline APawn* SpawnDefaultPawnFor(AFortGameModeAthena* GameMode, AFortPlayerController* Player, AActor* StartingLoc)
+	{
+		if (!GameMode || !Player || !StartingLoc)
+			return nullptr;
+
+		if (Player->Pawn)
+			return 0;
+
+		AFortPlayerControllerAthena* PC = (AFortPlayerControllerAthena*)Player;
+		AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)PC->PlayerState;
+		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+		if (!PC || !PlayerState || !GameState)
+			return nullptr;
+
+		auto Transform = StartingLoc->GetTransform();
+		auto Pawn = (AFortPlayerPawn*)GameMode->SpawnDefaultPawnAtTransform(Player, Transform);
+		if (!Pawn)
+			return nullptr;
+
+		Abilities::InitAbilitiesForPlayer(PC);
+
+		if (PC->XPComponent)
+		{
+			PC->XPComponent->bRegisteredWithQuestManager = true;
+			PC->XPComponent->OnRep_bRegisteredWithQuestManager();
+
+			PlayerState->SeasonLevelUIDisplay = PC->XPComponent->CurrentLevel;
+			PlayerState->OnRep_SeasonLevelUIDisplay();
+		}
+
+		auto* QuestManager = PC->GetQuestManager(ESubGame::Athena);
+		if (QuestManager)
+			QuestManager->InitializeQuestAbilities(Pawn);
+
+		FFortAthenaLoadout& CosmecticLoadoutPC = PC->CosmeticLoadoutPC;
+		bool bHasValidCosmeticLoadout = EnsureValidAthenaLoadout(CosmecticLoadoutPC, "player");
+
+		if (bHasValidCosmeticLoadout)
+		{
+			UFortKismetLibrary::UpdatePlayerCustomCharacterPartsVisualization(PlayerState);
+			PlayerState->OnRep_CharacterData();
+		}
+
+		PlayerState->SquadId = PlayerState->TeamIndex - 3;
+		PlayerState->OnRep_SquadId();
+
+		FGameMemberInfo Member;
+		Member.MostRecentArrayReplicationKey = -1;
+		Member.ReplicationID = -1;
+		Member.ReplicationKey = -1;
+		Member.TeamIndex = PlayerState->TeamIndex;
+		Member.SquadId = PlayerState->SquadId;
+		Member.MemberUniqueId = PlayerState->UniqueId;
+
+		GameState->GameMemberInfoArray.Members.Add(Member);
+		GameState->GameMemberInfoArray.MarkItemDirty(Member);
+
+		UAthenaPickaxeItemDefinition* PickDef;
+		PickDef = CosmecticLoadoutPC.Pickaxe != nullptr ? CosmecticLoadoutPC.Pickaxe : StaticLoadObject<UAthenaPickaxeItemDefinition>("/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
+		//UFortWeaponMeleeItemDefinition* PickDef = StaticLoadObject<UFortWeaponMeleeItemDefinition>("/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
+		if (PickDef) {
+			Inventory::GiveItem(PC, PickDef->WeaponDefinition, 1, 0);
+		}
+		else {
+			Log("Pick Doesent Exist!");
+		}
+		if (Pawn)
+		{
+			Pawn->CosmeticLoadout = PC->CosmeticLoadoutPC;
+			TryApplyPawnCosmeticLoadout(Pawn, "player pawn");
+		}
+
+		for (size_t i = 0; i < GameMode->StartingItems.Num(); i++)
+		{
+			if (GameMode->StartingItems[i].Count > 0)
+			{
+				Inventory::GiveItem(PC, GameMode->StartingItems[i].Item, GameMode->StartingItems[i].Count, 0);
+			}
+		}
+
+		GameState->OnRep_SafeZoneIndicator();
+		GameState->OnRep_SafeZonePhase();
+
+		PlayerState->ForceNetUpdate();
+		Pawn->ForceNetUpdate();
+		PC->ForceNetUpdate();
+
+		if (PlayerState && Pawn && Pawn->CosmeticLoadout.Character && Pawn->CosmeticLoadout.Character->HeroDefinition
+			&& EnsurePawnCustomizationAssetLoader(Pawn, "player pawn customization apply"))
+			ApplyCharacterCustomization(PlayerState, Pawn);
+
+		return Pawn;
+		//return (AFortPlayerPawnAthena*)GameMode->SpawnDefaultPawnAtTransform(Player, Transform);
+	}
+
+	inline bool IsValidAircraftZone(const FBox2D& Zone)
+	{
+		return Zone.bIsValid
+			&& Zone.Max.X > Zone.Min.X
+			&& Zone.Max.Y > Zone.Min.Y;
+	}
+
+	inline bool IsAircraftStartupReady(AFortGameStateAthena* GameState, std::string* Reason = nullptr)
+	{
+		if (!GameState)
+		{
+			if (Reason) *Reason = "missing game state";
+			return false;
+		}
+
+		AFortAthenaMapInfo* MapInfo = GameState->MapInfo;
+		if (!MapInfo)
+		{
+			if (Reason) *Reason = "missing map info";
+			return false;
+		}
+
+		if (!MapInfo->AircraftClass)
+		{
+			if (Reason) *Reason = "missing aircraft class";
+			return false;
+		}
+
+		if (!MapInfo->AircraftDropVolume)
+		{
+			if (Reason) *Reason = "missing aircraft drop volume";
+			return false;
+		}
+
+		if (!IsValidAircraftZone(MapInfo->AircraftSpawnZone))
+		{
+			if (Reason) *Reason = "invalid aircraft spawn zone";
+			return false;
+		}
+
+		if (!IsValidAircraftZone(MapInfo->AircraftDropZone))
+		{
+			if (Reason) *Reason = "invalid aircraft drop zone";
+			return false;
+		}
+
+		return true;
+	}
+
+	inline void PutPlayerInFallbackSkydive(AFortPlayerControllerAthena* PC)
+	{
+		if (!PC)
+			return;
+
+		AFortPlayerPawn* Pawn = (AFortPlayerPawn*)PC->Pawn;
+		if (!Pawn)
+			Pawn = PC->MyFortPawn;
+
+		if (!Pawn)
+			return;
+
+		FVector Loc = Pawn->K2_GetActorLocation();
+		if (Loc.Z < 12000.f)
+		{
+			Loc.Z = 12000.f;
+			Pawn->K2_TeleportTo(Loc, Pawn->K2_GetActorRotation());
+		}
+
+		Pawn->BeginSkydiving(true);
+		Pawn->ForceNetUpdate();
+		PC->ForceNetUpdate();
+	}
+
+	inline void StartNoAircraftFallback(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState, const std::string& Reason)
+	{
+		if (!GameMode || !GameState)
+			return;
+
+		EAthenaGamePhase OldPhase = GameState->GamePhase;
+		float Now = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+
+		GameState->bGameModeWillSkipAircraft = true;
+		GameState->AirCraftBehavior = EAirCraftBehavior::NoAircraft;
+		GameState->CachedSafeZoneStartUp = ESafeZoneStartUp::StartsWithNoAirCraft;
+		GameState->bAircraftIsLocked = false;
+		GameState->AircraftStartTime = Now;
+		GameState->SafeZonesStartTime = Now;
+		GameState->GamePhase = EAthenaGamePhase::SafeZones;
+		GameState->GamePhaseStep = EAthenaGamePhaseStep::StormForming;
+		GameMode->bFlightPathInitialized = true;
+
+		GameMode->JumpToSafeZonePhase();
+
+		for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
+			PutPlayerInFallbackSkydive(GameMode->AlivePlayers[i]);
+
+		for (auto PlayerBot : PlayerBotArray)
+		{
+			if (!PlayerBot || !PlayerBot->Pawn)
+				continue;
+
+			PlayerBot->Pawn->BeginSkydiving(true);
+			PlayerBot->BotState = EBotState::Skydiving;
+		}
+
+		GameState->OnRep_Aircraft();
+		GameState->OnRep_GamePhase(OldPhase);
+		GameState->OnRep_SafeZoneIndicator();
+		GameState->OnRep_SafeZonePhase();
+		GameState->ForceNetUpdate();
+
+		Log(std::string("Skipped native aircraft phase because ") + Reason + ".");
+	}
+
+	static __int64 (*StartAircraftPhaseOG)(AFortGameModeAthena* GameMode, char a2) = nullptr;
+	__int64 StartAircraftPhase(AFortGameModeAthena* GameMode, char a2)
+	{
+		Log("StartAircraftPhase hook called.");
+
+		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+		if (!Globals::LateGame && !Globals::bCreativeEnabled && !HasReadyHumanPlayer(GameMode))
+		{
+			HoldWarmupCountdown(GameMode, GameState, 30.f, "blocked aircraft phase");
+			Log("Blocked StartAircraftPhase until a human player is spawned and loading is complete.");
+			return 0;
+		}
+
+		if (!Globals::LateGame && !Globals::bCreativeEnabled)
+		{
+			std::string AircraftBlockReason;
+			if (GameState && GameState->CurrentPlaylistInfo.BasePlaylist
+				&& (GameState->CurrentPlaylistInfo.BasePlaylist->bSkipAircraft
+					|| GameState->CurrentPlaylistInfo.BasePlaylist->AirCraftBehavior == EAirCraftBehavior::NoAircraft
+					|| GameState->CurrentPlaylistInfo.BasePlaylist->SafeZoneStartUp == ESafeZoneStartUp::StartsWithNoAirCraft))
+			{
+				StartNoAircraftFallback(GameMode, GameState, "playlist is configured for no aircraft");
+				return 0;
+			}
+
+			if (Globals::bSkipUnsafeAircraftPhase)
+			{
+				StartNoAircraftFallback(GameMode, GameState, "native aircraft flight path initialization is unsafe for this startup");
+				return 0;
+			}
+
+			if (!IsAircraftStartupReady(GameState, &AircraftBlockReason))
+			{
+				HoldWarmupCountdown(GameMode, GameState, 15.f, "waiting for aircraft drop-zone data");
+				static int32 AircraftReadinessFailures = 0;
+				AircraftReadinessFailures++;
+
+				if (AircraftReadinessFailures < 4)
+				{
+					Log(std::string("Blocked StartAircraftPhase until aircraft startup data is valid: ") + AircraftBlockReason + ".");
+					return 0;
+				}
+
+				StartNoAircraftFallback(GameMode, GameState, AircraftBlockReason);
+				return 0;
+			}
+
+			if (Globals::bSkipUnsafeAircraftPhase
+				&& GameState
+				&& GameState->MapInfo
+				&& GameState->MapInfo->FlightInfos.Num() <= 0
+				&& GameState->TeamFlightPaths.Num() <= 0)
+			{
+				StartNoAircraftFallback(GameMode, GameState, "no cached aircraft flight path is available");
+				return 0;
+			}
+		}
+
+		for (auto FactionBot : FactionBots) // idek if im supposed to be setting these for the henchmens
+		{
+			static auto Name1 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhaseStep"));
+			static auto Name2 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhase"));
+			FactionBot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::BusLocked);
+			FactionBot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Aircraft);
+		}
+
+		for (auto PlayerBot : PlayerBotArray)
+		{
+
+			if (!Globals::LateGame) {
+				auto Name1 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhaseStep"));
+				auto Name2 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhase"));
+				PlayerBot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::BusLocked);
+				PlayerBot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Aircraft);
+			}
+			else {
+				auto Name1 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhaseStep"));
+				auto Name2 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhase"));
+				PlayerBot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::BusFlying);
+				PlayerBot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Aircraft);
+			}
+
+			static auto Name4 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_JumpOffBus_ExecutionStatus"));
+			static auto Name3 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_IsInBus"));
+			PlayerBot->PC->Blackboard->SetValueAsBool(Name3, true);
+			PlayerBot->PC->Blackboard->SetValueAsEnum(Name4, (uint8)EExecutionStatus::ExecutionAllowed);
+			 
+			if (!Globals::LateGame) {
+				PlayerBot->BotState = EBotState::PreBus; // Proper!
+			}
+			else {
+				PlayerBot->BotState = EBotState::Bus;
+			}
+		}
+
+		return StartAircraftPhaseOG(GameMode, a2);
+	}
+
+	static inline void (*OriginalOnAircraftExitedDropZone)(AFortGameModeAthena* GameMode, AFortAthenaAircraft* FortAthenaAircraft);
+	void OnAircraftExitedDropZone(AFortGameModeAthena* GameMode, AFortAthenaAircraft* FortAthenaAircraft)
+	{
+		Log("OnAircraftExitedDropZone!");
+
+		if (Globals::bBotsEnabled) { // kick all bots out of the bus
+			AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+			AActor* Aircraft = GameState ? GameState->GetAircraft(0) : nullptr;
+			for (auto PlayerBot : PlayerBotArray) {
+				if (PlayerBot->BotState == EBotState::Bus) {
+					if (Aircraft) {
+						FVector JumpLoc = Aircraft->K2_GetActorLocation();
+						JumpLoc.Z += 500.f;
+						JumpLoc.X += (rand() % 400) - 200;
+						JumpLoc.Y += (rand() % 400) - 200;
+						BotsBTService_AIDropZone::StartBotSkydivingFromBus(PlayerBot, JumpLoc, {});
+					}
+					else {
+						PlayerBot->Pawn->BeginSkydiving(true);
+						PlayerBot->BotState = EBotState::Skydiving;
+					}
+				}
+			}
+		}
+
+		if (Globals::bEventEnabled)
+		{
+			UFunction* StartEventFunc = Event::JerkyLoader->Class->GetFunction("BP_Jerky_Loader_C", "startevent");
+
+			float ToStart = 0.f;
+			Event::JerkyLoader->ProcessEvent(StartEventFunc, &ToStart);
+		}
+		
+		return OriginalOnAircraftExitedDropZone(GameMode, FortAthenaAircraft);
+	}
+
+	__int64 (*OnAircraftEnteredDropZoneOG)(AFortGameModeAthena*);
+	__int64 OnAircraftEnteredDropZone(AFortGameModeAthena* a1)
+	{
+		Log("OnAircraftEnteredDropZone Called!");
+
+		for (auto FactionBot : FactionBots)
+		{
+			static auto Name1 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhaseStep"));
+			static auto Name2 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhase"));
+			FactionBot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::BusFlying);
+			FactionBot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Aircraft);
+		}
+
+		if (!Globals::LateGame) {
+			for (auto PlayerBot : PlayerBotArray)
+			{
+				static auto Name1 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhaseStep"));
+				static auto Name2 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_GamePhase"));
+				PlayerBot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::BusFlying);
+				PlayerBot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Aircraft);
+
+				static auto Name9 = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_IsInBus"));
+
+				PlayerBot->PC->Blackboard->SetValueAsBool(Name9, true);
+
+				PlayerBot->BotState = EBotState::Bus;
+			}
+		}
+
+		return OnAircraftEnteredDropZoneOG(a1);
+	}
+
+	void (*StormOG)(AFortGameModeAthena* GameMode, int32 ZoneIndex);
+	void __fastcall Storm(AFortGameModeAthena* GameMode, int32 ZoneIndex)
+	{
+		auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+
+		static bool First = true;
+
+		if (Globals::LateGame && !First) //fixes crashing
+		{
+			for (size_t i = 0; i < GameMode->AlivePlayers.Num(); i++)
+			{
+				Quests::GiveAccolade(GameMode->AlivePlayers[i], StaticLoadObject<UFortAccoladeItemDefinition>("/Game/Athena/Items/Accolades/AccoladeID_SurviveStormCircle.AccoladeID_SurviveStormCircle"));
+			}
+		}
+		else if (!Globals::LateGame)
+		{
+			for (size_t i = 0; i < GameMode->AlivePlayers.Num(); i++)
+			{
+				Quests::GiveAccolade(GameMode->AlivePlayers[i], StaticLoadObject<UFortAccoladeItemDefinition>("/Game/Athena/Items/Accolades/AccoladeID_SurviveStormCircle.AccoladeID_SurviveStormCircle"));
+			}
+		}
+
+		static bool initstorm = false;
+
+		if (Globals::LateGame && !initstorm)
+		{
+			initstorm = true;
+			GameMode->SafeZonePhase = 4;
+			GameState->SafeZonePhase = 4;
+			GameState->SafeZonesStartTime = 0;
+			ZoneIndex = 4;
+			First = false;
+
+			if (Globals::bBotsEnabled) {
+				for (size_t i = 0; i < PlayerBotArray.size(); i++)
+				{
+					PlayerBotArray[i]->BotState = EBotState::Bus;
+				}
+			}
+		}
+
+		if (Globals::LateGame && initstorm)
+		{
+			int newPhase = GameState->SafeZonePhase + 1;
+
+			GameMode->SafeZonePhase = newPhase;
+			GameState->SafeZonePhase = newPhase;
+		}
+
+		if (Globals::bBotsEnabled && !Globals::LateGame) {
+			for (size_t i = 0; i < PlayerBotArray.size(); i++)
+			{
+				// Lets actually make sure the bot landed first before moving to zone
+				if (PlayerBotArray[i]->BotState < EBotState::Landed)
+					continue;
+				PlayerBotArray[i]->BotState = EBotState::MovingToSafeZone; // i dont know the best way to get the bots to move to zone tbh
+			}
+		}
+
+		return StormOG(GameMode, ZoneIndex);
+	}
+
+	void Hook() {
+		MH_CreateHook((LPVOID)(ImageBase + 0x4640A30), ReadyToStartMatch, (LPVOID*)&ReadyToStartMatchOG);
+
+		MH_CreateHook((LPVOID)(ImageBase + 0x18F6250), SpawnDefaultPawnFor, nullptr);
+
+		MH_CreateHook((LPVOID)(ImageBase + 0x18F9BB0), StartAircraftPhase, (LPVOID*)&StartAircraftPhaseOG);
+
+		MH_CreateHook((LPVOID)(ImageBase + 0x18E07D0), OnAircraftExitedDropZone, (LPVOID*)&OriginalOnAircraftExitedDropZone);
+
+		MH_CreateHook((LPVOID)(ImageBase + 0x18E0730), OnAircraftEnteredDropZone, (LPVOID*)&OnAircraftEnteredDropZoneOG);
+
+		MH_CreateHook((LPVOID)(ImageBase + 0x18FD350), Storm, (LPVOID*)&StormOG);
+
+		Log("Gamemode Hooked!");
+	}
+}
