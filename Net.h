@@ -23,69 +23,23 @@ namespace Net {
 	ENetMode (*WorldGetNetModeOG)(UWorld*);
 	ENetMode WorldGetNetMode(UWorld* a1)
 	{
-		std::string Name = a1->GetName();
-		/*if (Name != "Apollo_Terrain" && Name != "Frontend") {
-			Log(Name);
-		}*/
-
-		// Makes generators work for some reason
-		/*if (Name.contains("Apollo_Terrain")) {
-			return ENetMode::ListenServer;
-		}*/
-
-		ENetMode OriginalNetMode = WorldGetNetModeOG(a1);
-		//Log("WorldNetMode: " + std::to_string(static_cast<int>(OriginalNetMode)));
+		// This hook unconditionally reports a dedicated server. Do NOT touch a1
+		// here: GetNetMode() is called on the replication hot path (inside
+		// ServerReplicateActors / the ReplicationGraph) for actors that may be
+		// mid-construction or pending-kill, so dereferencing the argument (the
+		// old code did a1->GetName()) is a needless crash/perf surface.
 		return ENetMode::DedicatedServer;
 	}
 
 	ENetMode (*AActorGetNetModeOG)(AActor*);
 	ENetMode AActorGetNetMode(AActor* a1)
 	{
-		std::string Name = a1->GetName();
-
-		/*if (Name.contains("Sentry_Alarm")) {
-			TArray<AActor*> SecurityCameras;
-			auto CamClass = a1->Class;
-			Log(CamClass->GetFullName());
-			if (CamClass) {
-				TArray<AActor*> FoundCameras;
-				auto* Statics = (UGameplayStatics*)UGameplayStatics::StaticClass()->DefaultObject;
-				Statics->GetAllActorsOfClass(UWorld::GetWorld(), CamClass, &FoundCameras);
-
-				if (FoundCameras.Num() > CameraActors.Num()) {
-					CameraSpawners.Clear();
-					CameraActors = FoundCameras;
-
-					for (auto* Cam : CameraActors) {
-						if (!Cam) continue;
-
-						LocRot locRot;
-						locRot.Location = Cam->K2_GetActorLocation();
-						locRot.Rotation = Cam->K2_GetActorRotation();
-						Log("Cam Location:");
-						Log("X: " + std::to_string(locRot.Location.X));
-						Log("Y: " + std::to_string(locRot.Location.Y));
-						Log("Z: " + std::to_string(locRot.Location.Z));
-						Log("Cam Rotation:");
-						Log("Pitch: " + std::to_string(locRot.Rotation.Pitch));
-						Log("Yaw: " + std::to_string(locRot.Rotation.Yaw));
-						Log("Roll: " + std::to_string(locRot.Rotation.Roll));
-
-						CameraSpawners.Add(locRot);
-					}
-
-					Log("Updated Cams with " + std::to_string(CameraSpawners.Num()) + " entries.");
-				}
-			}
-			else {
-				Log("Cam class is null!");
-			}
-		}*/
-
-		//Log(Name);
-
-		ENetMode OriginalNetMode = AActorGetNetModeOG(a1);
-		//Log("AActorNetMode: " + std::to_string(static_cast<int>(OriginalNetMode)));
+		// Hot path: AActor::GetNetMode() is invoked for every actor many times
+		// per frame during ServerReplicateActors. The hook always returns
+		// DedicatedServer, so never dereference a1 (the old code called
+		// a1->GetName()) -- a transient/pending-kill actor would fault here,
+		// which matches the server dying on the first replication after a
+		// player is possessed.
 		return ENetMode::DedicatedServer;
 	}
 
