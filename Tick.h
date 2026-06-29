@@ -147,6 +147,37 @@ namespace AccoladeTickingService {
 namespace Tick {
 	void (*ServerReplicateActors)(void*) = decltype(ServerReplicateActors)(ImageBase + 0x1023F60);
 
+	// The dedicated server dies on the first ServerReplicateActors pass after a
+	// player is possessed (the OGS log always stops right after
+	// ServerAcknowledgePossession). That crash is inside the engine's
+	// ReplicationGraph, so the OGS log can't tell us where. SEH-wrap the call:
+	// on a fault we record the faulting instruction as an ImageBase-relative RVA
+	// and SKIP replication for that frame instead of letting the process vanish.
+	// This keeps the server alive AND hands us the exact crash address to fix.
+	// NOTE: __try/__except cannot live in a function that needs C++ object
+	// unwinding (MSVC C2712) and the filter must not build a std::string, so the
+	// RVA is captured here and all logging happens at the call site.
+	static unsigned __int64 g_ReplFaultRva = 0;
+
+	static int ReplFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_ReplFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	static bool SafeServerReplicate(void* RepDriver)
+	{
+		__try
+		{
+			ServerReplicateActors(RepDriver);
+			return true;
+		}
+		__except (ReplFaultFilter(GetExceptionInformation()))
+		{
+			return false;
+		}
+	}
+
 	inline void (*TickFlushOG)(UNetDriver*, float);
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
@@ -158,7 +189,31 @@ namespace Tick {
 
 		if (Driver->ReplicationDriver)
 		{
-			ServerReplicateActors(Driver->ReplicationDriver);
+			static bool bLoggedFirst = false;
+			static bool bLoggedOk = false;
+			static bool bLoggedFault = false;
+
+			if (!bLoggedFirst)
+			{
+				Log("Starting first manual ServerReplicateActors pass (SEH-guarded)...");
+				bLoggedFirst = true;
+			}
+
+			if (SafeServerReplicate(Driver->ReplicationDriver))
+			{
+				if (!bLoggedOk)
+				{
+					Log("ServerReplicateActors pass survived.");
+					bLoggedOk = true;
+				}
+			}
+			else if (!bLoggedFault)
+			{
+				char buf[192];
+				sprintf_s(buf, "ServerReplicateActors FAULTED at ImageBase+0x%llX -- skipping replication this frame to keep the server alive. Map this RVA to find the crash site.", (unsigned long long)g_ReplFaultRva);
+				LogError(buf);
+				bLoggedFault = true;
+			}
 		}
 		else
 		{
