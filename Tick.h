@@ -156,12 +156,14 @@ namespace Tick {
 		AFortGameModeAthena* GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
 		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 
-		if (!Driver->ReplicationDriver)
+		if (Driver->ReplicationDriver)
+		{
+			ServerReplicateActors(Driver->ReplicationDriver);
+		}
+		else
 		{
 			Log("ReplicationDriver Doesent Exist!");
 		}
-
-		ServerReplicateActors(Driver->ReplicationDriver);
 
 		if (!GameState || !GameMode)
 			return TickFlushOG(Driver, DeltaTime);

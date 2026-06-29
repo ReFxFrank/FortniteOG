@@ -1023,16 +1023,14 @@ namespace PC {
 	int64_t(*ApplyCostOG)(UGameplayAbility* arg1, int32_t arg2, void* arg3, void* arg4);
 	int64_t ApplyCost(UFortGameplayAbility* arg1, int32_t arg2, void* arg3, void* arg4)
 	{
-		auto Statics = (UGameplayStatics*)UGameplayStatics::StaticClass()->DefaultObject;
-		if (arg1->GetName().starts_with("GA_Athena_AppleSun_Passive_C_")) {
+		if (arg1 && arg1->GetName().starts_with("GA_Athena_AppleSun_Passive_C_")) {
 			auto Def = StaticLoadObject<UFortItemDefinition>("/Game/Athena/Items/Consumables/AppleSun/WID_Athena_AppleSun.WID_Athena_AppleSun");
 			auto ASC = arg1->GetActivatingAbilityComponent();
-			AFortPlayerStateAthena* PS = (AFortPlayerStateAthena*)ASC->GetOwner();
-			auto Pawn = PS->GetCurrentPawn();
-			AFortPlayerController* PC = nullptr;
-			PC = (AFortPlayerController*)Pawn->GetOwner();
+			AFortPlayerStateAthena* PS = ASC ? (AFortPlayerStateAthena*)ASC->GetOwner() : nullptr;
+			auto Pawn = PS ? PS->GetCurrentPawn() : nullptr;
+			AFortPlayerController* PC = Pawn ? (AFortPlayerController*)Pawn->GetOwner() : nullptr;
 
-			if (!PC->bInfiniteAmmo) {
+			if (PC && Def && !PC->bInfiniteAmmo) {
 				Inventory::RemoveItem(PC, Def, 1);
 			}
 		}
@@ -1043,6 +1041,9 @@ namespace PC {
 	void (*OnCapsuleBeginOverlapOG)(AFortPlayerPawn* Pawn, UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, FHitResult SweepResult);
 	void OnCapsuleBeginOverlap(AFortPlayerPawn* Pawn, UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, FHitResult SweepResult)
 	{
+		if (!Pawn || !OtherActor)
+			return;
+
 		if (OtherActor->IsA(AFortPickup::StaticClass()))
 		{
 			AFortPickup* Pickup = (AFortPickup*)OtherActor;
@@ -1057,6 +1058,9 @@ namespace PC {
 			}
 
 			auto PC = (AFortPlayerControllerAthena*)Pawn->GetOwner();
+			if (!PC || !PC->WorldInventory)
+				return OnCapsuleBeginOverlapOG(Pawn, OverlappedComp, OtherActor, OtherComp, OtherBodyIndex, bFromSweep, SweepResult);
+
 			FFortItemEntry* FoundEntry = nullptr;
 			auto HighestCount = 0;
 

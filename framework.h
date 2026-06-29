@@ -19,6 +19,8 @@
 #include <future>
 #include <set>
 #include <variant>
+#include <mutex>
+#include <cstdio>
 
 #include "minhook/MinHook.h"
 #include "SDK/SDK.hpp"
@@ -85,30 +87,91 @@ namespace TextManipUtils {
 	}
 }
 
-void Log(const std::string& msg)
+// ---------------------------------------------------------------------------
+// Logging
+//
+// Timestamped, severity-tagged lines written to the console AND to a
+// per-session file in an "OGS_Logs" folder next to the injected DLL (falling
+// back to the host process folder, then C:\OGS). Every line is flushed
+// immediately so the tail survives a hard crash, which matters for diagnosing
+// faults that kill the process.
+// ---------------------------------------------------------------------------
+
+inline HMODULE GDllModule = nullptr; // set from DllMain so we can locate the DLL's folder
+
+enum class ELogLevel { Info, Warn, Error };
+
+inline std::wstring OGS_DirFromModule(HMODULE Module)
 {
-	static bool firstCall = true;
-
-	if (firstCall)
+	wchar_t buf[MAX_PATH] = { 0 };
+	if (GetModuleFileNameW(Module, buf, MAX_PATH))
 	{
-		std::ofstream logFile("OGS_log.txt", std::ios::trunc);
-		if (logFile.is_open())
-		{
-			logFile << "[OGS]: Log file initialized!\n";
-			logFile.close();
-		}
-		firstCall = false;
+		std::wstring full(buf);
+		size_t slash = full.find_last_of(L"/\\");
+		if (slash != std::wstring::npos)
+			return full.substr(0, slash);
 	}
-
-	std::ofstream logFile("OGS_log.txt", std::ios::app);
-	if (logFile.is_open())
-	{
-		logFile << "[OGS]: " << msg << std::endl;
-		logFile.close();
-	}
-
-	std::cout << "[OGS]: " << msg << std::endl;
+	return L"";
 }
+
+inline const std::wstring& OGS_LogFilePath()
+{
+	static std::wstring path = []() -> std::wstring
+	{
+		std::wstring dir = OGS_DirFromModule(GDllModule);
+		if (dir.empty())
+			dir = OGS_DirFromModule(nullptr); // host process folder
+		if (dir.empty())
+			dir = L"C:\\OGS";
+
+		dir += L"\\OGS_Logs";
+		CreateDirectoryW(dir.c_str(), nullptr);
+
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		wchar_t name[64];
+		swprintf_s(name, L"\\OGS_%04d-%02d-%02d_%02d-%02d-%02d.log",
+			st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+		return dir + name;
+	}();
+	return path;
+}
+
+inline void OGS_LogImpl(ELogLevel level, const std::string& msg)
+{
+	static std::mutex mtx;
+	std::lock_guard<std::mutex> lock(mtx);
+
+	static std::ofstream file(OGS_LogFilePath().c_str(), std::ios::trunc);
+	static bool announced = false;
+	if (!announced)
+	{
+		announced = true;
+		const std::wstring& wp = OGS_LogFilePath();
+		std::string narrow(wp.begin(), wp.end());
+		std::cout << "[OGS] Logging to: " << narrow << std::endl;
+	}
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	char stamp[24];
+	sprintf_s(stamp, "%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+	const char* tag = level == ELogLevel::Error ? "ERROR" : (level == ELogLevel::Warn ? "WARN " : "INFO ");
+
+	std::string line = std::string("[") + stamp + "] [" + tag + "] [OGS] " + msg;
+
+	std::cout << line << std::endl;
+	if (file.is_open())
+	{
+		file << line << "\n";
+		file.flush();
+	}
+}
+
+inline void Log(const std::string& msg)      { OGS_LogImpl(ELogLevel::Info, msg); }
+inline void LogWarn(const std::string& msg)  { OGS_LogImpl(ELogLevel::Warn, msg); }
+inline void LogError(const std::string& msg) { OGS_LogImpl(ELogLevel::Error, msg); }
 
 inline void EnsureGameNetDriverDefinition()
 {

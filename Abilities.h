@@ -44,6 +44,9 @@ namespace Abilities {
 
 	void InternalServerTryActivateAbility(UAbilitySystemComponent* AbilitySystemComponent, FGameplayAbilitySpecHandle Handle, bool InputPressed, const struct FPredictionKey& InPredictionKey, FGameplayEventData* TriggerEventData)
 	{
+		if (!AbilitySystemComponent)
+			return;
+
 		FGameplayAbilitySpec* Spec = FindAbilitySpec(AbilitySystemComponent, Handle);
 		if (!Spec) {
 			return AbilitySystemComponent->ClientActivateAbilityFailed(Handle, InPredictionKey.Current);

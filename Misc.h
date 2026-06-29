@@ -31,8 +31,11 @@ static void RegisterPlayerHook(AGameSession* Session, AController* NewPlayer, vo
     void (*K2_DestroyActorOG)(AActor* This, __int64 a2);
     void K2_DestroyActor(AActor* This, __int64 a2)
     {
-        AFortGameModeAthena* GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
-        AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+        if (!This)
+            return;
+
+        UWorld* World = UWorld::GetWorld();
+        AFortGameStateAthena* GameState = World ? (AFortGameStateAthena*)World->GameState : nullptr;
 
         std::string Name = This->GetName();
         //Log(Name);
