@@ -19,9 +19,24 @@ namespace Looting {
         auto LlamasToSpawn = (rand() % 3) + 3;
         Log(std::string("Spawned ") + std::to_string(LlamasToSpawn) + " Llamas");
 
-        auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+        auto World = UWorld::GetWorld();
+        if (!World)
+            return;
 
+        auto GameState = (AFortGameStateAthena*)World->GameState;
+        if (!GameState)
+            return;
+
+        // MapInfo is a replicated/RepNotify pointer that is null until the map
+        // finishes loading/replicating (the rest of the codebase guards it
+        // everywhere -- e.g. PC.h before SupplyDropInfoList, GameMode.h's "Map
+        // isnt fully loaded yet" wait). SpawnLlamas runs unconditionally on the
+        // player-join setupWorld path, so a null MapInfo here crashes inside the
+        // loop -- at PickSupplyDropLocation(MapInfo, ...) and MapInfo->LlamaClass --
+        // right after the "Spawned N Llamas" log. Bail out instead.
         auto MapInfo = GameState->MapInfo;
+        if (!MapInfo)
+            return;
 
         for (int i = 0; i < LlamasToSpawn; i++)
         {
