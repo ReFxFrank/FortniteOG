@@ -288,7 +288,7 @@ namespace GameMode {
 				GameState->CurrentPlaylistId = Playlist->PlaylistId;
 				GameState->CurrentPlaylistInfo.MarkArrayDirty();
 
-				GameMode->GameSession->MaxPlayers = Globals::MaxBotsToSpawn + 1;
+				GameMode->GameSession->MaxPlayers = Globals::MaxPlayers; // total session capacity (humans + bots); decoupled from bot count so multiple users can connect
 				GameMode->GameSession->MaxSpectators = 0;
 				GameMode->GameSession->MaxPartySize = Playlist->MaxSquadSize;
 				GameMode->GameSession->MaxSplitscreensPerConnection = 2;

@@ -1,0 +1,47 @@
+name: Build OGS-S12 DLL
+
+# Builds the game-mode DLL with the real MSVC v143 toolchain on a Windows runner
+# (matches OGS-S12.vcxproj exactly) and uploads OGS-S12.dll as a downloadable
+# artifact so it can be grabbed and tested without a local Visual Studio install.
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/fortnite-balls-architecture-fffxi1"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # Release|x64 is the shipping config: it sets PrecompiledHeader=NotUsing
+      # (so the absent pch.h is fine), LanguageStandard=stdcpplatest, and produces
+      # x64\Release\OGS-S12.dll. MinHook is linked via a project-relative
+      # #pragma comment(lib, "minhook/minhook.lib"), so no extra lib dirs are needed.
+      - name: Build (Release | x64)
+        run: msbuild OGS-S12.vcxproj /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+
+      - name: Show build output
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "x64\Release") { Get-ChildItem -Recurse "x64\Release" | Select-Object FullName, Length }
+          else { Write-Host "x64\Release was not produced" }
+
+      - name: Upload OGS-S12.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: OGS-S12-dll
+          path: |
+            x64/Release/OGS-S12.dll
+            x64/Release/OGS-S12.pdb
+          if-no-files-found: error

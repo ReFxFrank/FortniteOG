@@ -27,6 +27,12 @@ namespace Globals {
 	bool Siphon = false;
 	bool Arena = false;
 
+	// Total session capacity (humans + bots). The engine's AGameSession::AtCapacity
+	// check rejects joins once this many players are connected, so this MUST be > 1
+	// for multiple users to play together. Previously MaxPlayers was derived from
+	// MaxBotsToSpawn + 1, which made a bots-off server a 1-slot lobby (only the first
+	// remote player could ever connect).
+	int MaxPlayers = 100;
 	int MaxBotsToSpawn = 0;
 	int MinPlayersForEarlyStart = 100;
 }
