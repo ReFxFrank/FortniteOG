@@ -145,38 +145,6 @@ namespace AccoladeTickingService {
 }
 
 namespace Tick {
-	void (*ServerReplicateActors)(void*) = decltype(ServerReplicateActors)(ImageBase + 0x1023F60);
-
-	// The dedicated server dies on the first ServerReplicateActors pass after a
-	// player is possessed (the OGS log always stops right after
-	// ServerAcknowledgePossession). That crash is inside the engine's
-	// ReplicationGraph, so the OGS log can't tell us where. SEH-wrap the call:
-	// on a fault we record the faulting instruction as an ImageBase-relative RVA
-	// and SKIP replication for that frame instead of letting the process vanish.
-	// This keeps the server alive AND hands us the exact crash address to fix.
-	// NOTE: __try/__except cannot live in a function that needs C++ object
-	// unwinding (MSVC C2712) and the filter must not build a std::string, so the
-	// RVA is captured here and all logging happens at the call site.
-	static unsigned __int64 g_ReplFaultRva = 0;
-
-	static int ReplFaultFilter(EXCEPTION_POINTERS* ep)
-	{
-		g_ReplFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
-		return EXCEPTION_EXECUTE_HANDLER;
-	}
-
-	static bool SafeServerReplicate(void* RepDriver)
-	{
-		__try
-		{
-			ServerReplicateActors(RepDriver);
-			return true;
-		}
-		__except (ReplFaultFilter(GetExceptionInformation()))
-		{
-			return false;
-		}
-	}
 
 	// Post-possession visibility. When the server does NOT crash, the OGS log
 	// otherwise goes silent right after ServerAck, so there is no way to see why
@@ -234,6 +202,43 @@ namespace Tick {
 	}
 
 	inline void (*TickFlushOG)(UNetDriver*, float);
+
+	// SEH-guarded native net tick. Native UNetDriver::TickFlush is what actually
+	// SENDS the queued replication bunches to clients, so it must run to completion
+	// or the client never leaves the loading screen. If it ever faults we record
+	// the address (as an ImageBase RVA) and skip just that frame instead of letting
+	// the dedicated server vanish. Kept unwinding-free so __try/__except is legal
+	// (C2712); DoNativeTick does the logging outside the __try.
+	static unsigned __int64 g_TickFaultRva = 0;
+	static int TickFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_TickFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeNativeTickFlush(UNetDriver* Driver, float DeltaTime)
+	{
+		__try
+		{
+			TickFlushOG(Driver, DeltaTime);
+			return true;
+		}
+		__except (TickFaultFilter(GetExceptionInformation()))
+		{
+			return false;
+		}
+	}
+	inline void DoNativeTick(UNetDriver* Driver, float DeltaTime)
+	{
+		static bool bLoggedTickFault = false;
+		if (!SafeNativeTickFlush(Driver, DeltaTime) && !bLoggedTickFault)
+		{
+			char buf[208];
+			sprintf_s(buf, "Native TickFlush FAULTED at ImageBase+0x%llX -- skipping native net tick this frame to keep the server alive.", (unsigned long long)g_TickFaultRva);
+			LogError(buf);
+			bLoggedTickFault = true;
+		}
+	}
+
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
 		if (!Driver)
@@ -242,41 +247,18 @@ namespace Tick {
 		AFortGameModeAthena* GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
 		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 
-		if (Driver->ReplicationDriver)
-		{
-			static bool bLoggedFirst = false;
-			static bool bLoggedOk = false;
-			static bool bLoggedFault = false;
-
-			if (!bLoggedFirst)
-			{
-				Log("Starting first manual ServerReplicateActors pass (SEH-guarded)...");
-				bLoggedFirst = true;
-			}
-
-			if (SafeServerReplicate(Driver->ReplicationDriver))
-			{
-				if (!bLoggedOk)
-				{
-					Log("ServerReplicateActors pass survived.");
-					bLoggedOk = true;
-				}
-			}
-			else if (!bLoggedFault)
-			{
-				char buf[192];
-				sprintf_s(buf, "ServerReplicateActors FAULTED at ImageBase+0x%llX -- skipping replication this frame to keep the server alive. Map this RVA to find the crash site.", (unsigned long long)g_ReplFaultRva);
-				LogError(buf);
-				bLoggedFault = true;
-			}
-		}
-		else
-		{
-			Log("ReplicationDriver Doesent Exist!");
-		}
+		// We intentionally do NOT manually call ServerReplicateActors here anymore.
+		// Native UNetDriver::TickFlush (below) runs the ReplicationGraph itself once
+		// a client is connected (ClientConnections > 0). Calling it manually too ran
+		// a SECOND replication pass over already-consumed graph state every frame,
+		// which faulted inside the native net tick (observed at ImageBase+0x429E01A)
+		// the instant a player joined. Skipping the native tick to survive that fault
+		// also skipped the engine's packet send, leaving the client stuck on the
+		// loading screen. One native replication pass fixes both: no double-pass
+		// crash, and the bunches actually get sent to the client.
 
 		if (!GameState || !GameMode)
-			return TickFlushOG(Driver, DeltaTime);
+			return DoNativeTick(Driver, DeltaTime);
 
 		if (Driver->ReplicationDriver) // only report the game net driver, not beacons
 			LogJoinDiagnostics(Driver, GameMode, GameState);
@@ -365,7 +347,7 @@ namespace Tick {
 			AdminPanel::ProcessPending();
 		}
 
-		return TickFlushOG(Driver, DeltaTime);
+		return DoNativeTick(Driver, DeltaTime);
 	}
 
 	inline float GetMaxTickRate()
