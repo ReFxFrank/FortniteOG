@@ -246,12 +246,10 @@ namespace PC {
 			PhantomBoothSpawner::SpawnBooths();
 			Log("setupWorld: booths done");
 
-			// Re-enable the henchmen/spy-base sentry turrets (BP_Spy_Turret), their
-			// spawners, and alarm cameras -- they ship with ticking disabled, and this
-			// helper (previously defined but never called) flips them back on so the
-			// turrets actually track and fire.
-			ReactivateSentryActors();
-			Log("setupWorld: sentry turrets/cameras re-enabled");
+			// NOTE: ReactivateSentryActors() was tried here but froze the server -- its
+			// native sentry ticks (and the BP_Athena_Spawner_Sentry spawner, which spawns
+			// fresh AI) are not crash-guarded and destabilized the AI/nav state, which also
+			// made the subsequent bot spawn fault. Turrets need a safer, narrower approach.
 
 			TArray<AActor*> VendingMachinesArray;
 
