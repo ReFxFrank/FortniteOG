@@ -210,6 +210,25 @@ namespace PC {
 		return true;
 	}
 
+	// Re-run the warmup spawn AFTER the match has gone InProgress. The first warmup spawn
+	// happens before StartMatch, so its ClientGotoState("Playing") handshake fires while
+	// MatchState is still WaitingToStart -- the client ignores it and stays in the
+	// spectator/freecam camera (mouse turns the view but WASD just free-floats). Destroying
+	// the pawn and respawning now re-runs the client-restart handshake with MatchState
+	// already InProgress, so the player actually controls their character on the island.
+	inline void ReassertWarmupControl(AFortPlayerControllerAthena* PC)
+	{
+		if (!PC)
+			return;
+		if (PC->Pawn)
+		{
+			APawn* Old = PC->Pawn;
+			PC->UnPossess();          // so TryManualWarmupSpawn's PC->Pawn guard passes
+			Old->K2_DestroyActor();
+		}
+		TryManualWarmupSpawn(PC, "warmup control re-assert after match start");
+	}
+
 	void (*ServerReadyToStartMatchOG)(AFortPlayerControllerAthena* PC);
 
 	// The native ServerReadyToStartMatch is the real (unsafe) aircraft match-start. With

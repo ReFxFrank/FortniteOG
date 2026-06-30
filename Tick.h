@@ -335,6 +335,27 @@ namespace Tick {
 		__except (BoardFaultFilter(GetExceptionInformation())) { return false; }
 	}
 
+	// SEH-guarded re-handshake of every human right after the match goes InProgress, so the
+	// prelobby player can actually walk instead of free-camming. Respawns + re-runs the
+	// client restart, which pokes native engine paths -- a fault must skip, not kill the
+	// server. Unwinding-free so __try/__except is legal (C2712).
+	static unsigned __int64 g_WarmupCtrlFaultRva = 0;
+	static int WarmupCtrlFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_WarmupCtrlFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeReassertWarmupControl(AFortGameModeAthena* GameMode)
+	{
+		__try
+		{
+			for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
+				PC::ReassertWarmupControl(GameMode->AlivePlayers[i]);
+			return true;
+		}
+		__except (WarmupCtrlFaultFilter(GetExceptionInformation())) { return false; }
+	}
+
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
 		if (!Driver)
@@ -432,6 +453,18 @@ namespace Tick {
 				GameMode->WarmupCountdownDuration = 30.f;
 				GameMode->WarmupEarlyCountdownDuration = 30.f;
 				GameState->ForceNetUpdate();
+
+				// Re-run the player's client-restart handshake now that the match is
+				// InProgress -- the warmup spawn's handshake ran while MatchState was still
+				// WaitingToStart, so the client ignored it and stayed in the freecam camera.
+				static bool bLoggedWarmupCtrlFault = false;
+				if (!SafeReassertWarmupControl(GameMode) && !bLoggedWarmupCtrlFault)
+				{
+					char buf[200];
+					sprintf_s(buf, "ReassertWarmupControl FAULTED at ImageBase+0x%llX -- prelobby control may be limited.", (unsigned long long)g_WarmupCtrlFaultRva);
+					LogError(buf);
+					bLoggedWarmupCtrlFault = true;
+				}
 			}
 		}
 
