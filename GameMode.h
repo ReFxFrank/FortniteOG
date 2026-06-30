@@ -148,9 +148,16 @@ namespace GameMode {
 		Log(Message);
 	}
 
+	// Latched true once we intentionally start the match (no-aircraft drop). After
+	// that, KeepWarmupUntilHumanReady must NOT drag the phase back to warmup even if a
+	// pawn is briefly un-acknowledged (Possess / native RestartPlayer transiently
+	// clear AcknowledgedPawn) -- otherwise the phase bounces SafeZones->Warmup every
+	// time the countdown expires, the 30s bus/storm/"waiting for players" loop.
+	inline bool g_OGSMatchStarted = false;
+
 	inline void KeepWarmupUntilHumanReady(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState, const char* Reason)
 	{
-		if (Globals::LateGame || Globals::bCreativeEnabled || HasReadyHumanPlayer(GameMode))
+		if (g_OGSMatchStarted || Globals::LateGame || Globals::bCreativeEnabled || HasReadyHumanPlayer(GameMode))
 			return;
 
 		if (GameState && GameState->GamePhase > EAthenaGamePhase::Warmup)
@@ -676,16 +683,13 @@ namespace GameMode {
 		if (!Pawn)
 			return;
 
-		// The original teleported the pawn to Z=12000 and called BeginSkydiving, but
-		// BeginSkydiving faults in this server-as-client setup (SEH telemetry showed
-		// "skydive=0, fault in FallbackSkydive"). Worse, the teleport-to-sky runs
-		// first, so the fault strands the player 12000 units up with no skydive and
-		// no control -- exactly the "stuck in free cam, never get a character" state.
-		// Keep the player on the ground where they spawned and (re)assert client
-		// control so they leave the warmup spectator camera and can actually move.
-		PC->Possess((APawn*)Pawn);
-		PC->ClientRestart((APawn*)Pawn);
-		PC->ClientRetryClientRestart((APawn*)Pawn);
+		// Do NOT teleport-to-sky + BeginSkydiving (BeginSkydiving faults here and the
+		// teleport would strand the player in the air), and do NOT re-Possess: Possess
+		// clears AcknowledgedPawn, which made HasReadyHumanPlayer briefly false and let
+		// KeepWarmupUntilHumanReady drag the phase back to warmup -> a 30s bus/storm
+		// loop. The pawn is already possessed from the warmup spawn; just force-
+		// replicate it. (Leaving the spectator camera is driven by MatchState ->
+		// InProgress via StartMatch, not by re-possessing here.)
 		Pawn->ForceNetUpdate();
 		PC->ForceNetUpdate();
 	}
@@ -706,8 +710,16 @@ namespace GameMode {
 	// the OnReps (which replicate the phase change to the client) must still run.
 	// No C++ object unwinding in here so __try/__except is legal (C2712).
 	static void RunNoAircraftNative(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState,
-		EAthenaGamePhase OldPhase, bool* JumpOk, bool* SkydiveOk, bool* RepOk)
+		EAthenaGamePhase OldPhase, bool* MatchOk, bool* JumpOk, bool* SkydiveOk, bool* RepOk)
 	{
+		// Drive the GameMode match state to InProgress. The client's "WAITING FOR
+		// PLAYERS" spectator camera is keyed off MatchState (not the Athena GamePhase
+		// we drive), and the native match-start is skipped to block aircraft -- so
+		// without this MatchState stays at WaitingToStart and the player never gets
+		// control of their character. Guarded because HandleMatchHasStarted is native.
+		__try { GameMode->StartMatch(); *MatchOk = true; }
+		__except (NoAirFaultFilter(GetExceptionInformation(), "StartMatch")) { *MatchOk = false; }
+
 		__try { GameMode->JumpToSafeZonePhase(); *JumpOk = true; }
 		__except (NoAirFaultFilter(GetExceptionInformation(), "JumpToSafeZonePhase")) { *JumpOk = false; }
 
@@ -759,14 +771,18 @@ namespace GameMode {
 		GameState->GamePhaseStep = EAthenaGamePhaseStep::StormForming;
 		GameMode->bFlightPathInitialized = true;
 
-		bool JumpOk = false, SkydiveOk = false, RepOk = false;
-		RunNoAircraftNative(GameMode, GameState, OldPhase, &JumpOk, &SkydiveOk, &RepOk);
+		// We are intentionally starting the match now -- stop the warmup-hold from
+		// dragging the phase back to warmup from here on.
+		g_OGSMatchStarted = true;
 
-		if (!JumpOk || !SkydiveOk || !RepOk)
+		bool MatchOk = false, JumpOk = false, SkydiveOk = false, RepOk = false;
+		RunNoAircraftNative(GameMode, GameState, OldPhase, &MatchOk, &JumpOk, &SkydiveOk, &RepOk);
+
+		if (!MatchOk || !JumpOk || !SkydiveOk || !RepOk)
 		{
 			char buf[256];
-			sprintf_s(buf, "No-aircraft fallback partial (jump=%d skydive=%d rep=%d); last fault in %s at ImageBase+0x%llX -- server kept alive.",
-				JumpOk ? 1 : 0, SkydiveOk ? 1 : 0, RepOk ? 1 : 0, g_NoAirFaultStep, (unsigned long long)g_NoAirFaultRva);
+			sprintf_s(buf, "No-aircraft fallback partial (match=%d jump=%d skydive=%d rep=%d); last fault in %s at ImageBase+0x%llX -- server kept alive.",
+				MatchOk ? 1 : 0, JumpOk ? 1 : 0, SkydiveOk ? 1 : 0, RepOk ? 1 : 0, g_NoAirFaultStep, (unsigned long long)g_NoAirFaultRva);
 			LogError(buf);
 		}
 
