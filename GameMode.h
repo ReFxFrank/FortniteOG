@@ -683,13 +683,24 @@ namespace GameMode {
 		if (!Pawn)
 			return;
 
-		// Do NOT teleport-to-sky + BeginSkydiving (BeginSkydiving faults here and the
-		// teleport would strand the player in the air), and do NOT re-Possess: Possess
-		// clears AcknowledgedPawn, which made HasReadyHumanPlayer briefly false and let
-		// KeepWarmupUntilHumanReady drag the phase back to warmup -> a 30s bus/storm
-		// loop. The pawn is already possessed from the warmup spawn; just force-
-		// replicate it. (Leaving the spectator camera is driven by MatchState ->
-		// InProgress via StartMatch, not by re-possessing here.)
+		// The pawn is already possessed (pawn=1, ackPawn=1); the client is just stuck in
+		// the warmup "WAITING FOR PLAYERS" spectator/fly camera. That state is driven by
+		// bPlayerIsWaiting / the spectator flags, not by possession or MatchState. Flip
+		// the player out of waiting/spectating and tell the client to enter the Playing
+		// state so it controls its pawn. (No teleport/BeginSkydiving -- that native call
+		// faults -- and no re-Possess, which would un-acknowledge the pawn and loop the
+		// phase.)
+		PC->bPlayerIsWaiting = false;
+		if (PC->PlayerState)
+		{
+			PC->PlayerState->bIsSpectator = false;
+			PC->PlayerState->bOnlySpectator = false;
+			PC->PlayerState->ForceNetUpdate();
+		}
+
+		static FName PlayingState = UKismetStringLibrary::Conv_StringToName(L"Playing");
+		PC->ClientGotoState(PlayingState);
+
 		Pawn->ForceNetUpdate();
 		PC->ForceNetUpdate();
 	}
