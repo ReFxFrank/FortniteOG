@@ -33,6 +33,6 @@ namespace Globals {
 	// MaxBotsToSpawn + 1, which made a bots-off server a 1-slot lobby (only the first
 	// remote player could ever connect).
 	int MaxPlayers = 100;
-	int MaxBotsToSpawn = 25;
+	int MaxBotsToSpawn = 95;
 	int MinPlayersForEarlyStart = 100;
 }
