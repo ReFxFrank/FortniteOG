@@ -976,7 +976,37 @@ namespace GameMode {
 			}
 		}
 
-		return StartAircraftPhaseOG(GameMode, a2);
+		__int64 AircraftResult = StartAircraftPhaseOG(GameMode, a2);
+
+		// Board the manually-spawned human players onto the live bus. StartAircraftPhaseOG
+		// spawns and flies the bus but never seats our warmup-pawn humans -- so without this
+		// the client renders the grounded warmup pawn as falling, which reads as the player
+		// jumping instantly. ClientEnterAircraft binds the controller to the bus (the riding
+		// camera) and ServerSetInAircraft makes bInAircraft authoritative. The warmup pawn is
+		// left intact and is replaced by ServerAttemptAircraftJump's RestartPlayer when the
+		// player actually presses jump, so jump-on-input keeps working.
+		if (!Globals::LateGame && !Globals::bCreativeEnabled && GameState)
+		{
+			AFortAthenaAircraft* Bus = GameState->GetAircraft(0);
+			if (Bus)
+			{
+				for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
+				{
+					AFortPlayerControllerAthena* HumanPC = GameMode->AlivePlayers[i];
+					if (!HumanPC || (HumanPC->PlayerState && HumanPC->PlayerState->bIsABot))
+						continue;
+
+					UFortControllerComponent_Aircraft* AircraftComp = HumanPC->GetAircraftComponent();
+					if (AircraftComp)
+						AircraftComp->ClientEnterAircraft((AFortAircraft*)Bus);
+
+					if (HumanPC->PlayerState)
+						((AFortPlayerStateZone*)HumanPC->PlayerState)->ServerSetInAircraft(true);
+				}
+			}
+		}
+
+		return AircraftResult;
 	}
 
 	static inline void (*OriginalOnAircraftExitedDropZone)(AFortGameModeAthena* GameMode, AFortAthenaAircraft* FortAthenaAircraft);
@@ -988,18 +1018,15 @@ namespace GameMode {
 			AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 			AActor* Aircraft = GameState ? GameState->GetAircraft(0) : nullptr;
 			for (auto PlayerBot : PlayerBotArray) {
-				if (PlayerBot->BotState == EBotState::Bus) {
-					if (Aircraft) {
-						FVector JumpLoc = Aircraft->K2_GetActorLocation();
-						JumpLoc.Z += 500.f;
-						JumpLoc.X += (rand() % 400) - 200;
-						JumpLoc.Y += (rand() % 400) - 200;
-						BotsBTService_AIDropZone::StartBotSkydivingFromBus(PlayerBot, JumpLoc, {});
-					}
-					else {
-						PlayerBot->Pawn->BeginSkydiving(true);
-						PlayerBot->BotState = EBotState::Skydiving;
-					}
+				// Only skydive bots off a real bus. The bare BeginSkydiving fallback (no
+				// aircraft) faults in this setup; with the native bus restored Aircraft is
+				// valid, and if it is momentarily null the per-tick Bus logic ejects them.
+				if (PlayerBot->BotState == EBotState::Bus && Aircraft) {
+					FVector JumpLoc = Aircraft->K2_GetActorLocation();
+					JumpLoc.Z += 500.f;
+					JumpLoc.X += (rand() % 400) - 200;
+					JumpLoc.Y += (rand() % 400) - 200;
+					BotsBTService_AIDropZone::StartBotSkydivingFromBus(PlayerBot, JumpLoc, {});
 				}
 			}
 		}

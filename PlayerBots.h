@@ -2957,6 +2957,17 @@ namespace PlayerBots {
                     bot->bHasThankedBusDriver = true;
                     bot->PC->ThankBusDriver();
                 }
+                // PreBus -> Bus fallback. The only native promoter is OnAircraftEnteredDropZone,
+                // which can be missed -- stranding bots in PreBus so they never jump. Once the
+                // bus is actually flying, advance to Bus so the drop-zone tick (below) can jump
+                // them off and steer them to their target POI.
+                if (GameState && GameState->GamePhase >= EAthenaGamePhase::Aircraft && GameState->GetAircraft(0))
+                {
+                    static auto NameIsInBus = UKismetStringLibrary::Conv_StringToName(TEXT("AIEvaluator_Global_IsInBus"));
+                    if (bot->PC && bot->PC->Blackboard)
+                        bot->PC->Blackboard->SetValueAsBool(NameIsInBus, true);
+                    bot->BotState = EBotState::Bus;
+                }
             }
             else if (bot->BotState == EBotState::Bus || bot->BotState == EBotState::Skydiving || bot->BotState == EBotState::Gliding) {
                 if (Globals::LateGame && UKismetMathLibrary::GetDefaultObj()->RandomBoolWithWeight(0.5f)) {
