@@ -2666,6 +2666,77 @@ namespace PlayerBots {
         }
     }
 
+    // Returns the world's main nav data, locating/registering it if the nav system hasn't.
+    // On the dedicated server MainNavData is frequently null AND NavDataSet is empty even
+    // though the baked RecastNavMesh from Apollo_Nav_Gameplay has streamed in as an actor --
+    // so as a last resort we find the RecastNavMesh actor directly and register it. Returns
+    // null if no nav mesh exists in the world yet (still streaming).
+    inline ANavigationData* EnsureWorldNavData()
+    {
+        UWorld* World = UWorld::GetWorld();
+        if (!World)
+            return nullptr;
+        auto NavSys = (UNavigationSystemV1*)World->NavigationSystem;
+        if (!NavSys)
+            return nullptr;
+
+        if (NavSys->MainNavData)
+            return NavSys->MainNavData;
+
+        if (NavSys->NavDataSet.Num() > 0)
+        {
+            NavSys->MainNavData = NavSys->NavDataSet[0];
+            return NavSys->MainNavData;
+        }
+
+        // NavDataSet empty -- find the baked RecastNavMesh actor directly and register it.
+        TArray<AActor*> NavActors;
+        UGameplayStatics::GetDefaultObj()->GetAllActorsOfClass(World, ARecastNavMesh::StaticClass(), &NavActors);
+        ANavigationData* Found = nullptr;
+        if (NavActors.Num() > 0)
+        {
+            Found = (ANavigationData*)NavActors[0];
+            NavSys->MainNavData = Found;
+            NavSys->NavDataSet.Add(Found);
+        }
+        NavActors.Free();
+        return Found;
+    }
+
+    // Push the world nav data onto every spawned bot's path-following component. Bots spawn
+    // during warmup, usually before Apollo_Nav_Gameplay finishes registering its
+    // RecastNavMesh, so their MyNavData starts null and MoveToActor/MoveToLocation do
+    // nothing (no roaming/looting/chasing). Returns true once nav data exists and was
+    // assigned -- the tick calls this until it takes.
+    inline bool TryAssignNavDataToBots()
+    {
+        ANavigationData* Nav = EnsureWorldNavData();
+        if (!Nav)
+            return false;
+
+        int assigned = 0;
+        for (size_t i = 0; i < PlayerBotArray.size(); i++)
+        {
+            PlayerBot* bot = PlayerBotArray[i];
+            if (bot && bot->PC && bot->PC->PathFollowingComponent)
+            {
+                bot->PC->PathFollowingComponent->MyNavData = Nav;
+                bot->PC->PathFollowingComponent->OnNavDataRegistered(Nav);
+                assigned++;
+            }
+        }
+
+        static bool bLoggedNavAssign = false;
+        if (!bLoggedNavAssign)
+        {
+            char navbuf[160];
+            sprintf_s(navbuf, "Nav mesh registered; assigned MainNavData to %d bot(s) -- they can path now.", assigned);
+            Log(navbuf);
+            bLoggedNavAssign = true;
+        }
+        return true;
+    }
+
     void SpawnPlayerBots(AActor* SpawnLocator, EBotState StartingState = EBotState::Warmup, AFortPlayerControllerAthena* TeamPC = nullptr)
     {
         if (!Globals::bBotsEnabled)
@@ -2850,33 +2921,20 @@ namespace PlayerBots {
         bot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::Warmup);
         bot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Warmup);
 
-        // MainNavData is frequently left null on the dedicated server even though the baked
-        // RecastNavMesh from Apollo_Nav_Gameplay registered into NavDataSet -- so every bot
-        // logs "No NavData" and the native AI strains trying to path nav-less bots (a likely
-        // contributor to the aircraft-phase freezes). If the main nav data isn't assigned but
-        // a nav data set exists, adopt the first registered nav data as the main one.
-        auto NavSys = (UNavigationSystemV1*)UWorld::GetWorld()->NavigationSystem;
-        if (NavSys && !NavSys->MainNavData && NavSys->NavDataSet.Num() > 0)
+        // Give this bot the world nav data so MoveToActor/MoveToLocation can path. The nav
+        // mesh (Apollo_Nav_Gameplay's RecastNavMesh) often hasn't finished streaming when
+        // bots spawn during warmup, so EnsureWorldNavData may return null here -- the tick's
+        // TryAssignNavDataToBots then back-fills every bot once the mesh registers.
+        ANavigationData* BotNav = EnsureWorldNavData();
+        bot->PC->PathFollowingComponent->MyNavData = BotNav;
+        if (BotNav)
+            bot->PC->PathFollowingComponent->OnNavDataRegistered(BotNav);
+        else
         {
-            NavSys->MainNavData = NavSys->NavDataSet[0];
-            static bool bLoggedNavAdopt = false;
-            if (!bLoggedNavAdopt)
-            {
-                Log("Adopted NavDataSet[0] as MainNavData (bots can now path).");
-                bLoggedNavAdopt = true;
-            }
-        }
-
-        bot->PC->PathFollowingComponent->MyNavData = ((UAthenaNavSystem*)UWorld::GetWorld()->NavigationSystem)->MainNavData;
-        bot->PC->PathFollowingComponent->OnNavDataRegistered(((UAthenaNavSystem*)UWorld::GetWorld()->NavigationSystem)->MainNavData);
-        if (((UAthenaNavSystem*)UWorld::GetWorld()->NavigationSystem)->MainNavData) {
-            //Log("NavData!");
-        }
-        else {
             static bool bLoggedNoNav = false;
             if (!bLoggedNoNav)
             {
-                Log("No NavData! (NavDataSet empty -- nav mesh not registered yet)");
+                Log("No NavData yet (nav mesh still streaming); the tick will back-fill bots once it registers.");
                 bLoggedNoNav = true;
             }
         }

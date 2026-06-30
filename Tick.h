@@ -318,6 +318,13 @@ namespace Tick {
 		}
 		__except (BotFaultFilter(GetExceptionInformation())) { return false; }
 	}
+	// SEH-guarded nav back-fill: locate/register the streamed nav mesh and push it onto the
+	// bots. GetAllActorsOfClass + nav registration touch native paths, so a fault must skip.
+	static bool SafeAssignNavData()
+	{
+		__try { return PlayerBots::TryAssignNavDataToBots(); }
+		__except (BotFaultFilter(GetExceptionInformation())) { return false; }
+	}
 
 	// SEH-guarded human bus boarding. Runs every tick during the Aircraft phase and
 	// seats any not-yet-aboard human onto the live bus. Boarding pokes native RPCs
@@ -596,6 +603,22 @@ namespace Tick {
 				sprintf_s(buf, "Bot tick FAULTED at ImageBase+0x%llX -- skipped this frame to keep the server alive.", (unsigned long long)g_BotFaultRva);
 				LogError(buf);
 				bLoggedBotTickFault = true;
+			}
+
+			// Back-fill nav data onto the bots once Apollo_Nav_Gameplay's RecastNavMesh has
+			// finished streaming (bots spawn during warmup before it registers, so they start
+			// with null nav and can't path). Retry ~every 2s until it takes, then stop.
+			static bool bNavAssigned = false;
+			static float NextNavTry = 0.f;
+			if (!bNavAssigned)
+			{
+				float NowNav = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+				if (NowNav >= NextNavTry)
+				{
+					NextNavTry = NowNav + 2.0f;
+					if (SafeAssignNavData())
+						bNavAssigned = true;
+				}
 			}
 		}
 
