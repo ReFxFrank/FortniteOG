@@ -264,6 +264,14 @@ public:
     // The dropzone that the bot will attempt to land at
     FVector TargetDropZone = FVector();
 
+    // Roaming target during the prelobby/warmup phase, and when to pick a fresh one. Keeps
+    // bots milling around the spawn island instead of standing in place / only emoting.
+    FVector WarmupWanderTarget = FVector();
+    float NextWarmupWanderTime = 0.f;
+
+    // One-shot: has this bot been handed its post-landing starter kit yet?
+    bool bGaveLandingLoadout = false;
+
     // The closest distance achieved to the targetdropzone, will be used mostly for determining bus drop
     float ClosestDistToDropZone = FLT_MAX;
 
@@ -653,6 +661,54 @@ public:
         PC->Inventory->Inventory.ItemInstances.Add(Item);
         PC->Inventory->Inventory.MarkItemDirty(Item->ItemEntry);
         PC->Inventory->HandleInventoryLocalUpdate();
+    }
+
+    // Loads one weapon def out of a curated pool (LateGameLoot), retrying once on a null load.
+    UFortItemDefinition* LoadPooledWeapon(const std::vector<std::string>& Pool)
+    {
+        if (Pool.empty())
+            return nullptr;
+        for (int i = 0; i < 2; i++)
+        {
+            UFortItemDefinition* Def = StaticLoadObject<UFortItemDefinition>(Pool[rand() % Pool.size()]);
+            if (Def)
+                return Def;
+        }
+        return nullptr;
+    }
+
+    // Hand a freshly-landed bot a usable kit (AR + shotgun + ammo + mats + minis) so it drops
+    // straight into the combat brain -- which already aims, fires, strafes and builds -- instead
+    // of wandering with only a pickaxe hunting for loot that may not be near where it landed.
+    // Bots still pick up better loot from the world; this is just a floor so they aren't helpless.
+    void GiveLandingLoadout()
+    {
+        if (bGaveLandingLoadout || !PC || !PC->Inventory || !Pawn)
+            return;
+        bGaveLandingLoadout = true;
+
+        const std::vector<std::string>* Pools[2] = { &Assault_rifle, &Shotgun };
+        for (auto* Pool : Pools)
+        {
+            UFortItemDefinition* Def = LoadPooledWeapon(*Pool);
+            if (!Def)
+                continue;
+            GiveItemBot(Def, 1, 999); // generous magazine so they keep firing through the match
+            if (auto* Ranged = Cast<UFortWeaponRangedItemDefinition>(Def))
+            {
+                if (UFortWorldItemDefinition* Ammo = Ranged->GetAmmoWorldItemDefinition_BP())
+                    GiveItemBot((UFortItemDefinition*)Ammo, 500, 0); // reserve ammo for reloads
+            }
+        }
+
+        static UFortItemDefinition* WoodDef  = StaticLoadObject<UFortItemDefinition>("/Game/Items/ResourcePickups/WoodItemData.WoodItemData");
+        static UFortItemDefinition* StoneDef = StaticLoadObject<UFortItemDefinition>("/Game/Items/ResourcePickups/StoneItemData.StoneItemData");
+        static UFortItemDefinition* MiniDef  = StaticLoadObject<UFortItemDefinition>("/Game/Athena/Items/Consumables/ShieldSmall/Athena_ShieldSmall.Athena_ShieldSmall");
+        if (WoodDef)  GiveItemBot(WoodDef, 350);
+        if (StoneDef) GiveItemBot(StoneDef, 150);
+        if (MiniDef)  GiveItemBot(MiniDef, 6);
+
+        SimpleSwitchToWeapon();
     }
 
     FFortItemEntry* GetEntry(UFortItemDefinition* Def)
@@ -2369,38 +2425,68 @@ public:
         }
     }
 
+    // Pick (or refresh) a roam destination around wherever the bot currently is. We don't
+    // know the prelobby island's exact bounds, so wander relative to the bot's position --
+    // random bearing + radius, re-rolled when reached or on a timer. The Z is kept level so
+    // the target stays on roughly the same surface the bot is standing on.
+    void PickWarmupWanderTarget(PlayerBot* bot, FVector BotPos, float Now) {
+        float Angle = Math->RandomFloatInRange(0.f, 6.2831853f);
+        float Radius = Math->RandomFloatInRange(700.f, 2600.f);
+        bot->WarmupWanderTarget = FVector(BotPos.X + cosf(Angle) * Radius,
+                                          BotPos.Y + sinf(Angle) * Radius,
+                                          BotPos.Z);
+        bot->NextWarmupWanderTime = Now + Math->RandomFloatInRange(3.5f, 8.0f);
+    }
+
 public:
     void Tick(PlayerBot* bot) {
         if (bot->BotWarmupChoice == EBotWarmupChoice::MAX) {
             DetermineBotWarmupChoice(bot);
         }
-        else if (bot->BotWarmupChoice == EBotWarmupChoice::Emote) {
-            if (bot->tick_counter % 300 == 0) {
-                bot->Emote();
-            }
-        }
-        else {
-            if (bot->tick_counter % 150 == 0) {
-                bot->NearestPlayerActor = bot->GetNearestPlayerActor();
-                auto BotPos = bot->Pawn->K2_GetActorLocation();
-                if (bot->NearestPlayerActor) {
-                    FVector Nearest = bot->NearestPlayerActor->K2_GetActorLocation();
-                    if (!Nearest.IsZero()) {
-                        float Dist = Math->Vector_Distance(BotPos, Nearest);
-                        if (Dist < 200.f + rand() % 300) {
-                            bot->LookAt(bot->NearestPlayerActor);
-                            if (UKismetMathLibrary::GetDefaultObj()->RandomBool()) {
-                                bot->Emote();
-                            }
-                        }
-                        else {
-                            bot->LookAt(bot->NearestPlayerActor);
-                            bot->MoveToActorThrottled(bot->NearestPlayerActor, 100.f, 0.8f);
-                        }
-                    }
+
+        float Now = Statics->GetTimeSeconds(UWorld::GetWorld());
+        FVector BotPos = bot->Pawn->K2_GetActorLocation();
+
+        // If a human is close, walk over and emote at them like the old behaviour (more lively
+        // than wandering past). Bots that drew the pure-Emote choice still do this so the
+        // prelobby doesn't feel empty. The nearest-actor scan is O(players) so only refresh it
+        // every ~15 ticks per bot rather than every frame for all of them.
+        if (bot->tick_counter % 15 == 0)
+            bot->NearestPlayerActor = bot->GetNearestPlayerActor();
+        if (bot->NearestPlayerActor) {
+            FVector Nearest = bot->NearestPlayerActor->K2_GetActorLocation();
+            if (!Nearest.IsZero()) {
+                float Dist = Math->Vector_Distance(BotPos, Nearest);
+                if (Dist < 280.f) {
+                    bot->LookAt(bot->NearestPlayerActor);
+                    if (bot->tick_counter % 240 == 0 && Math->RandomBool())
+                        bot->Emote();
+                    return; // hang out next to the player
+                }
+                if (Dist < 2600.f && bot->BotWarmupChoice == EBotWarmupChoice::MoveToPlayerEmote) {
+                    bot->Run();
+                    bot->LookAt(bot->NearestPlayerActor);
+                    bot->MoveToActorThrottled(bot->NearestPlayerActor, 220.f, 0.5f);
+                    return;
                 }
             }
         }
+
+        // Otherwise wander the island. Re-pick the target when it's missing, reached, or stale.
+        if (bot->WarmupWanderTarget.IsZero() || Now >= bot->NextWarmupWanderTime ||
+            Math->Vector_Distance(BotPos, bot->WarmupWanderTarget) < 260.f) {
+            PickWarmupWanderTarget(bot, BotPos, Now);
+        }
+
+        bot->Run();
+        bot->LookAt(nullptr);
+        FRotator Face = Math->FindLookAtRotation(BotPos, bot->WarmupWanderTarget);
+        bot->SetLookRotation(FRotator(0.f, Face.Yaw, 0.f));
+        bot->MoveToLocationThrottled(bot->WarmupWanderTarget, 200.f, 0.5f);
+
+        // Toss in the occasional emote mid-roam so they read as players, not drones.
+        if (bot->tick_counter % 600 == 0 && Math->RandomBoolWithWeight(0.25f))
+            bot->Emote();
     }
 };
 
@@ -2543,18 +2629,27 @@ public:
             }
 
             if (!bot->TargetDropZone.IsZero()) {
-                // Steer toward the drop zone. Feeding the steep look-at rotation (pitch -80)
-                // straight into AddMovementInput points the input vector nearly straight down,
-                // so the bot barely tracks horizontally and just freefalls. Drive the
-                // horizontal direction toward the target directly (full magnitude) and only
-                // use the steep pitch for the camera/look so they visibly dive toward their POI.
-                FRotator LookRot = Math->FindLookAtRotation(BotPos, bot->TargetDropZone);
-                bot->SetLookRotation(FRotator(-65.f, LookRot.Yaw, 0.f));
-
+                // Steer toward the drop zone with *proportional* horizontal input. Driving full
+                // magnitude until we're exactly over the target makes the bot overshoot, reverse,
+                // overshoot again -- the "looping back and forth near one spot" the bus drop had.
+                // Ease the input off as we close in, and once we're basically above the target
+                // (deadzone) stop steering and just fall straight down.
                 FVector ToTarget = bot->TargetDropZone - BotPos;
                 ToTarget.Z = 0.f;
-                ToTarget = ToTarget.Normalize();
-                bot->Pawn->AddMovementInput(ToTarget, 1.f, true);
+                float HorizDist = sqrtf((ToTarget.X * ToTarget.X) + (ToTarget.Y * ToTarget.Y));
+
+                FRotator LookRot = Math->FindLookAtRotation(BotPos, bot->TargetDropZone);
+                // dive steeper once nearly above the target so they drop in rather than circle it
+                float Pitch = HorizDist > 1500.f ? -55.f : -82.f;
+                bot->SetLookRotation(FRotator(Pitch, LookRot.Yaw, 0.f));
+
+                if (HorizDist > 600.f) {
+                    ToTarget.X /= HorizDist;
+                    ToTarget.Y /= HorizDist;
+                    float Scale = HorizDist > 2500.f ? 1.f : (HorizDist / 2500.f);
+                    if (Scale < 0.25f) Scale = 0.25f;
+                    bot->Pawn->AddMovementInput(ToTarget, Scale, true);
+                }
             }
         }
         else if (bot->BotState == EBotState::Gliding) {
@@ -2569,20 +2664,23 @@ public:
             }
 
             if (!bot->TargetDropZone.IsZero()) {
-                float Dist = Math->Vector_Distance(BotPos, bot->TargetDropZone);
+                FVector ToTarget = bot->TargetDropZone - BotPos;
+                ToTarget.Z = 0.f;
+                float HorizDist = sqrtf((ToTarget.X * ToTarget.X) + (ToTarget.Y * ToTarget.Y));
+
                 FRotator TargetRot = Math->FindLookAtRotation(BotPos, bot->TargetDropZone);
                 TargetRot.Pitch = 0.f;
                 TargetRot.Roll = 0.f;
-
                 bot->SetLookRotation(TargetRot);
 
-                if (Dist > 500.f) {
-                    // Glide straight at the target horizontally instead of trusting the pawn's
-                    // (async-updated) facing, so they actually close on the POI under canopy.
-                    FVector ToTarget = bot->TargetDropZone - BotPos;
-                    ToTarget.Z = 0.f;
-                    ToTarget = ToTarget.Normalize();
-                    bot->Pawn->AddMovementInput(ToTarget, 1.f, true);
+                // Proportional glide steer with a deadzone -- same fix as the dive, so they ease
+                // onto the target instead of sailing past it and weaving back and forth.
+                if (HorizDist > 400.f) {
+                    ToTarget.X /= HorizDist;
+                    ToTarget.Y /= HorizDist;
+                    float Scale = HorizDist > 1500.f ? 1.f : (HorizDist / 1500.f);
+                    if (Scale < 0.2f) Scale = 0.2f;
+                    bot->Pawn->AddMovementInput(ToTarget, Scale, true);
                 }
             }
         }
@@ -3073,6 +3171,7 @@ namespace PlayerBots {
             }
 
             if (bot->BotState >= EBotState::Landed && bot->BotState != EBotState::Stuck) {
+                bot->GiveLandingLoadout(); // one-shot; arms the bot so the combat brain has something to use
                 BotBrain::Tick(bot, GameState);
                 bot->tick_counter++;
                 continue;
