@@ -50,11 +50,7 @@ namespace PE {
         {
             Log("ServerSetClientHasFinishedLoading intercepted.");
             PC::MarkServerFinishedLoading(PC, "ServerSetClientHasFinishedLoading");
-            // In native aircraft mode the engine spawns the player on the warmup island
-            // and boards them onto the bus itself (matching the upstream reference);
-            // a manual pawn here collides with that and makes the player insta-jump.
-            if (GameMode::ShouldForceNoAircraftStartup())
-                PC::TryManualWarmupSpawn(PC, "ServerSetClientHasFinishedLoading");
+            PC::TryManualWarmupSpawn(PC, "ServerSetClientHasFinishedLoading");
         }
 
         return Result;

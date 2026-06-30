@@ -305,15 +305,10 @@ namespace PC {
 			return;
 		}
 
-		// In native aircraft mode let the engine place the player (it may spawn the
-		// island warmup pawn a tick later); only force a manual spawn in no-aircraft mode.
-		if (GameMode::ShouldForceNoAircraftStartup())
+		bool bManualSpawned = TryManualWarmupSpawn(PC, "ServerReadyToStartMatch fallback");
+		if (PC && PC->Pawn)
 		{
-			bool bManualSpawned = TryManualWarmupSpawn(PC, "ServerReadyToStartMatch fallback");
-			if (PC && PC->Pawn)
-			{
-				MarkServerFinishedLoading(PC, bManualSpawned ? "ServerReadyToStartMatch manual fallback" : "ServerReadyToStartMatch existing pawn");
-			}
+			MarkServerFinishedLoading(PC, bManualSpawned ? "ServerReadyToStartMatch manual fallback" : "ServerReadyToStartMatch existing pawn");
 		}
 	}
 
@@ -396,10 +391,7 @@ namespace PC {
 		}
 
 		ServerLoadingScreenDroppedOG(PC);
-		// Native aircraft mode owns warmup spawning + bus boarding; only manually spawn
-		// in no-aircraft mode (otherwise the ground pawn makes the player insta-jump).
-		if (GameMode::ShouldForceNoAircraftStartup())
-			TryManualWarmupSpawn(PC, "ServerLoadingScreenDropped");
+		TryManualWarmupSpawn(PC, "ServerLoadingScreenDropped");
 		return;
 	}
 
