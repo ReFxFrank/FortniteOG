@@ -221,10 +221,18 @@ namespace Tick {
 				continue;
 			bool hasPawn = PC->Pawn != nullptr;
 			bool ackPawn = (PC->Pawn != nullptr) && (PC->AcknowledgedPawn == PC->Pawn);
-			char pl[256];
-			sprintf_s(pl, "[DIAG]   PC[%d]: pawn=%d ackPawn=%d finishedLoading=%d readyToStart=%d",
+			// waiting/spectator are what actually drive the client's warmup free camera;
+			// log them so we can see whether the player is still "waiting" on the server's
+			// side even when the pawn is possessed + acknowledged.
+			int waiting = PC->bPlayerIsWaiting ? 1 : 0;
+			int onlySpec = PC->PlayerState ? (PC->PlayerState->bOnlySpectator ? 1 : 0) : -1;
+			int isSpec = PC->PlayerState ? (PC->PlayerState->bIsSpectator ? 1 : 0) : -1;
+			int inAir = PC->IsInAircraft() ? 1 : 0;
+			char pl[320];
+			sprintf_s(pl, "[DIAG]   PC[%d]: pawn=%d ackPawn=%d finishedLoading=%d readyToStart=%d waiting=%d onlySpec=%d isSpec=%d inAircraft=%d",
 				i, hasPawn ? 1 : 0, ackPawn ? 1 : 0,
-				PC->bHasServerFinishedLoading ? 1 : 0, PC->bReadyToStartMatch ? 1 : 0);
+				PC->bHasServerFinishedLoading ? 1 : 0, PC->bReadyToStartMatch ? 1 : 0,
+				waiting, onlySpec, isSpec, inAir);
 			Log(pl);
 		}
 	}

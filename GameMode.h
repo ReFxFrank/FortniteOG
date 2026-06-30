@@ -676,20 +676,9 @@ namespace GameMode {
 		if (!PC)
 			return;
 
-		AFortPlayerPawn* Pawn = (AFortPlayerPawn*)PC->Pawn;
-		if (!Pawn)
-			Pawn = PC->MyFortPawn;
-
-		if (!Pawn)
-			return;
-
-		// The pawn is already possessed (pawn=1, ackPawn=1); the client is just stuck in
-		// the warmup "WAITING FOR PLAYERS" spectator/fly camera. That state is driven by
-		// bPlayerIsWaiting / the spectator flags, not by possession or MatchState. Flip
-		// the player out of waiting/spectating and tell the client to enter the Playing
-		// state so it controls its pawn. (No teleport/BeginSkydiving -- that native call
-		// faults -- and no re-Possess, which would un-acknowledge the pawn and loop the
-		// phase.)
+		// Clear the warmup "WAITING FOR PLAYERS" waiting/spectator flags up front so the
+		// fresh restart below hands the client a playing pawn instead of re-entering the
+		// waiting camera.
 		PC->bPlayerIsWaiting = false;
 		if (PC->PlayerState)
 		{
@@ -698,10 +687,41 @@ namespace GameMode {
 			PC->PlayerState->ForceNetUpdate();
 		}
 
+		// Why the player was stuck in free cam: the client still holds the *warmup* pawn
+		// the manual spawn gave it during ServerReadyToStartMatch. StartMatch() does NOT
+		// restart a controller that already has a pawn, and flipping the waiting/spectator
+		// flags after the fact never re-runs the engine's client restart handshake -- so
+		// the client stays in the warmup waiting camera even though the server shows
+		// pawn=1 ackPawn=1 viewTarget=1. Do exactly what the real bus-jump does
+		// (ServerAttemptAircraftJump): drop the warmup pawn and let the native
+		// RestartPlayer spawn a FRESH gameplay pawn, now that the match is InProgress, then
+		// drive ClientRestart ourselves (native RestartPlayer does not reliably emit the
+		// client RPC in this server-as-client setup). g_OGSMatchStarted is already latched,
+		// so the transient un-acknowledge from the re-possess can't bounce the phase back
+		// to warmup, and the whole step runs under RunNoAircraftNative's SEH.
+		AFortGameModeAthena* GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
+
+		APawn* OldPawn = PC->Pawn;
+		if (OldPawn)
+		{
+			PC->UnPossess();            // GetPawn() == null so RestartPlayer spawns a fresh pawn
+			OldPawn->K2_DestroyActor();
+		}
+
+		if (GameMode)
+			GameMode->RestartPlayer(PC);
+
+		if (PC->Pawn)
+		{
+			PC->ClientRestart(PC->Pawn);
+			PC->ClientRetryClientRestart(PC->Pawn);
+		}
+
 		static FName PlayingState = UKismetStringLibrary::Conv_StringToName(L"Playing");
 		PC->ClientGotoState(PlayingState);
 
-		Pawn->ForceNetUpdate();
+		if (PC->Pawn)
+			PC->Pawn->ForceNetUpdate();
 		PC->ForceNetUpdate();
 	}
 
@@ -768,6 +788,16 @@ namespace GameMode {
 	{
 		if (!GameMode || !GameState)
 			return;
+
+		// StartAircraftPhase can reach the hook twice in the same tick (our warmup-expiry
+		// path and the native warmup timer both fire), which would double-run StartMatch /
+		// JumpToSafeZonePhase and double-restart every player. g_OGSMatchStarted is only
+		// ever set here, so use it to make the drop happen exactly once.
+		if (g_OGSMatchStarted)
+		{
+			Log("No-aircraft fallback already ran; ignoring duplicate StartAircraftPhase.");
+			return;
+		}
 
 		EAthenaGamePhase OldPhase = GameState->GamePhase;
 		float Now = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
