@@ -141,6 +141,15 @@ namespace PC {
 		if (!GameModeAthena || !GameState || !PlayerState || !GameState->MapInfo)
 			return false;
 
+		// Only manual-warmup-spawn during Setup/Warmup. Once the bus is flying (Aircraft)
+		// or the match is underway (SafeZones+), the player is riding the bus or already
+		// deployed -- a pawn-less controller in those phases is EXPECTED (you have no
+		// ground pawn while in the aircraft). Spawning + possessing a fresh warmup pawn
+		// here calls ClientRestart, which clears the controller's aircraft seating
+		// (CurrentAircraft) and knocks the player off the bus mid-flight. Skip it.
+		if (GameState->GamePhase > EAthenaGamePhase::Warmup)
+			return false;
+
 		GameMode::HoldWarmupCountdown(GameModeAthena, GameState, 45.f, Reason);
 
 		AActor* StartSpot = GameModeAthena->FindPlayerStart(PC, L"");
