@@ -146,6 +146,34 @@ namespace AccoladeTickingService {
 
 namespace Tick {
 
+	// Native UNetDriver::TickFlush does NOT run the ReplicationGraph in this
+	// server-as-client setup, so we drive it ourselves every frame -- this is what
+	// builds and delivers the outgoing bunches to each client. CONFIRMED load-
+	// bearing: removing it regressed the client to conns=1 but pawn=0 with no
+	// client RPCs (the client never received its PlayerController, so it never sent
+	// ServerSetClientHasFinishedLoading). SEH-wrapped so a transient bad actor in
+	// the graph can't vanish the server; the fault RVA is captured for diagnosis.
+	void (*ServerReplicateActors)(void*) = decltype(ServerReplicateActors)(ImageBase + 0x1023F60);
+
+	static unsigned __int64 g_ReplFaultRva = 0;
+	static int ReplFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_ReplFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeServerReplicate(void* RepDriver)
+	{
+		__try
+		{
+			ServerReplicateActors(RepDriver);
+			return true;
+		}
+		__except (ReplFaultFilter(GetExceptionInformation()))
+		{
+			return false;
+		}
+	}
+
 	// Post-possession visibility. When the server does NOT crash, the OGS log
 	// otherwise goes silent right after ServerAck, so there is no way to see why
 	// a connected client is stuck on the loading screen. Emit a throttled status
@@ -247,15 +275,21 @@ namespace Tick {
 		AFortGameModeAthena* GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
 		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 
-		// We intentionally do NOT manually call ServerReplicateActors here anymore.
-		// Native UNetDriver::TickFlush (below) runs the ReplicationGraph itself once
-		// a client is connected (ClientConnections > 0). Calling it manually too ran
-		// a SECOND replication pass over already-consumed graph state every frame,
-		// which faulted inside the native net tick (observed at ImageBase+0x429E01A)
-		// the instant a player joined. Skipping the native tick to survive that fault
-		// also skipped the engine's packet send, leaving the client stuck on the
-		// loading screen. One native replication pass fixes both: no double-pass
-		// crash, and the bunches actually get sent to the client.
+		// Drive the ReplicationGraph ourselves -- native TickFlush does not do it in
+		// this setup, and without it the client never receives its PlayerController
+		// and can't progress past initial loading. SEH-guarded so a transient bad
+		// actor can't vanish the server.
+		if (Driver->ReplicationDriver)
+		{
+			static bool bLoggedReplFault = false;
+			if (!SafeServerReplicate(Driver->ReplicationDriver) && !bLoggedReplFault)
+			{
+				char buf[208];
+				sprintf_s(buf, "ServerReplicateActors FAULTED at ImageBase+0x%llX -- skipped this frame.", (unsigned long long)g_ReplFaultRva);
+				LogError(buf);
+				bLoggedReplFault = true;
+			}
+		}
 
 		if (!GameState || !GameMode)
 			return DoNativeTick(Driver, DeltaTime);
