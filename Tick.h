@@ -319,6 +319,22 @@ namespace Tick {
 		__except (BotFaultFilter(GetExceptionInformation())) { return false; }
 	}
 
+	// SEH-guarded human bus boarding. Runs every tick during the Aircraft phase and
+	// seats any not-yet-aboard human onto the live bus. Boarding pokes native RPCs
+	// (ClientEnterAircraft / ServerSetInAircraft) so a fault here must skip the frame,
+	// not vanish the server. Unwinding-free so __try/__except is legal (C2712).
+	static unsigned __int64 g_BoardFaultRva = 0;
+	static int BoardFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_BoardFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeBoardHumansOntoBus(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
+	{
+		__try { GameMode::BoardHumansOntoBus(GameMode, GameState); return true; }
+		__except (BoardFaultFilter(GetExceptionInformation())) { return false; }
+	}
+
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
 		if (!Driver)
@@ -496,6 +512,22 @@ namespace Tick {
 
 		if (GameState->GamePhase > EAthenaGamePhase::Warmup && !Globals::bCreativeEnabled) {
 			AccoladeTickingService::Tick(GameMode, GameState);
+		}
+
+		// While the bus is flying, keep seating any human who hasn't boarded yet (the
+		// bus actor often isn't live the instant StartAircraftPhase returns, so this
+		// retries each tick until everyone is aboard). Riding the bus is what lets the
+		// player jump when THEY choose instead of the client rendering a falling pawn.
+		if (GameState->GamePhase == EAthenaGamePhase::Aircraft && !GameMode::ShouldForceNoAircraftStartup())
+		{
+			static bool bLoggedBoardFault = false;
+			if (!SafeBoardHumansOntoBus(GameMode, GameState) && !bLoggedBoardFault)
+			{
+				char buf[200];
+				sprintf_s(buf, "BoardHumansOntoBus FAULTED at ImageBase+0x%llX -- skipped to keep the server alive.", (unsigned long long)g_BoardFaultRva);
+				LogError(buf);
+				bLoggedBoardFault = true;
+			}
 		}
 
 		if (Globals::bBossesEnabled && !Globals::bEventEnabled && GameState->GamePhase > EAthenaGamePhase::Warmup)

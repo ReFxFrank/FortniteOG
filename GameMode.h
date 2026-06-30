@@ -976,37 +976,47 @@ namespace GameMode {
 			}
 		}
 
-		__int64 AircraftResult = StartAircraftPhaseOG(GameMode, a2);
+		// Human players are boarded onto the bus from the tick (BoardHumansOntoBus) rather
+		// than here -- GetAircraft(0) is often still null the instant StartAircraftPhaseOG
+		// returns, so a one-shot board here would silently miss.
+		return StartAircraftPhaseOG(GameMode, a2);
+	}
 
-		// Board the manually-spawned human players onto the live bus. StartAircraftPhaseOG
-		// spawns and flies the bus but never seats our warmup-pawn humans -- so without this
-		// the client renders the grounded warmup pawn as falling, which reads as the player
-		// jumping instantly. ClientEnterAircraft binds the controller to the bus (the riding
-		// camera) and ServerSetInAircraft makes bInAircraft authoritative. The warmup pawn is
-		// left intact and is replaced by ServerAttemptAircraftJump's RestartPlayer when the
-		// player actually presses jump, so jump-on-input keeps working.
-		if (!Globals::LateGame && !Globals::bCreativeEnabled && GameState)
+	// Seat each manually-spawned human onto the live bus so they RIDE it (instead of the
+	// client rendering their grounded warmup pawn as falling, which reads as an instant
+	// jump). Sets the controller-component CurrentAircraft authoritatively on the server
+	// (so PC->IsInAircraft() and the DIAG reflect it), tells the client to enter via
+	// ClientEnterAircraft, and flips the player-state bInAircraft. Idempotent: skips anyone
+	// already aboard. The warmup pawn is left intact and is replaced by
+	// ServerAttemptAircraftJump's RestartPlayer when the player presses jump.
+	inline void BoardHumansOntoBus(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
+	{
+		if (Globals::LateGame || Globals::bCreativeEnabled || !GameMode || !GameState)
+			return;
+
+		AFortAthenaAircraft* Bus = GameState->GetAircraft(0);
+		if (!Bus)
+			return;
+
+		for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
 		{
-			AFortAthenaAircraft* Bus = GameState->GetAircraft(0);
-			if (Bus)
+			AFortPlayerControllerAthena* HumanPC = GameMode->AlivePlayers[i];
+			if (!HumanPC || (HumanPC->PlayerState && HumanPC->PlayerState->bIsABot))
+				continue;
+			if (HumanPC->IsInAircraft())
+				continue; // already aboard
+
+			UFortControllerComponent_Aircraft* AircraftComp = HumanPC->GetAircraftComponent();
+			if (AircraftComp)
 			{
-				for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
-				{
-					AFortPlayerControllerAthena* HumanPC = GameMode->AlivePlayers[i];
-					if (!HumanPC || (HumanPC->PlayerState && HumanPC->PlayerState->bIsABot))
-						continue;
-
-					UFortControllerComponent_Aircraft* AircraftComp = HumanPC->GetAircraftComponent();
-					if (AircraftComp)
-						AircraftComp->ClientEnterAircraft((AFortAircraft*)Bus);
-
-					if (HumanPC->PlayerState)
-						((AFortPlayerStateZone*)HumanPC->PlayerState)->ServerSetInAircraft(true);
-				}
+				AircraftComp->CurrentAircraft = (AFortAircraft*)Bus; // authoritative server-side
+				AircraftComp->ClientEnterAircraft((AFortAircraft*)Bus); // client riding camera
 			}
-		}
+			if (HumanPC->PlayerState)
+				((AFortPlayerStateZone*)HumanPC->PlayerState)->ServerSetInAircraft(true);
 
-		return AircraftResult;
+			Log("Boarded human player onto the battle bus.");
+		}
 	}
 
 	static inline void (*OriginalOnAircraftExitedDropZone)(AFortGameModeAthena* GameMode, AFortAthenaAircraft* FortAthenaAircraft);
