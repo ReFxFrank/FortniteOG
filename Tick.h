@@ -297,6 +297,31 @@ namespace Tick {
 		if (Driver->ReplicationDriver) // only report the game net driver, not beacons
 			LogJoinDiagnostics(Driver, GameMode, GameState);
 
+		// Advance the match out of Setup once a human is fully ready. The native
+		// ServerReadyToStartMatch (which normally drives Setup -> Warmup) is skipped
+		// to avoid the unsafe aircraft startup, so the Athena GamePhase otherwise
+		// stays stuck at Setup (1) forever -- and EVERY warmup/match-start path below
+		// is gated on GamePhase == Warmup (2), so nothing runs: no countdown, no bot
+		// fill, no StartAircraftPhase. The player just stands in Setup. Flip it to
+		// Warmup with a fresh countdown; the existing logic then runs the countdown,
+		// fills bots, and on expiry calls StartAircraftPhase -> no-aircraft fallback,
+		// which skydives the player in and begins SafeZones.
+		if (GameState->GamePhase == EAthenaGamePhase::Setup
+			&& GameMode::HasReadyHumanPlayer(GameMode))
+		{
+			EAthenaGamePhase OldPhase = GameState->GamePhase;
+			float Now = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+			GameState->GamePhase = EAthenaGamePhase::Warmup;
+			GameState->GamePhaseStep = EAthenaGamePhaseStep::Warmup;
+			GameState->WarmupCountdownStartTime = Now;
+			GameState->WarmupCountdownEndTime = Now + 30.f;
+			GameMode->WarmupCountdownDuration = 30.f;
+			GameMode->WarmupEarlyCountdownDuration = 30.f;
+			GameState->OnRep_GamePhase(OldPhase);
+			GameState->ForceNetUpdate();
+			Log("Advanced game phase Setup -> Warmup (human ready); match starts after warmup.");
+		}
+
 		GameMode::KeepWarmupUntilHumanReady(GameMode, GameState, "TickFlush");
 
 		if (GameState->GamePhase == EAthenaGamePhase::Warmup
