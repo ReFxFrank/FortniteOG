@@ -676,14 +676,16 @@ namespace GameMode {
 		if (!Pawn)
 			return;
 
-		FVector Loc = Pawn->K2_GetActorLocation();
-		if (Loc.Z < 12000.f)
-		{
-			Loc.Z = 12000.f;
-			Pawn->K2_TeleportTo(Loc, Pawn->K2_GetActorRotation());
-		}
-
-		Pawn->BeginSkydiving(true);
+		// The original teleported the pawn to Z=12000 and called BeginSkydiving, but
+		// BeginSkydiving faults in this server-as-client setup (SEH telemetry showed
+		// "skydive=0, fault in FallbackSkydive"). Worse, the teleport-to-sky runs
+		// first, so the fault strands the player 12000 units up with no skydive and
+		// no control -- exactly the "stuck in free cam, never get a character" state.
+		// Keep the player on the ground where they spawned and (re)assert client
+		// control so they leave the warmup spectator camera and can actually move.
+		PC->Possess((APawn*)Pawn);
+		PC->ClientRestart((APawn*)Pawn);
+		PC->ClientRetryClientRestart((APawn*)Pawn);
 		Pawn->ForceNetUpdate();
 		PC->ForceNetUpdate();
 	}
