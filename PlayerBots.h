@@ -124,6 +124,12 @@ struct LearningStats;
 struct CombatState;
 struct PlayerBot;
 
+// Set true once a usable nav mesh has been located and pushed onto the bots. On this server
+// build the baked RecastNavMesh never streams in, so this stays false and the bots steer
+// themselves with direct movement input instead of nav-mesh path following (the fix for bots
+// "running in place" after they land, since MoveToActor/MoveToLocation do nothing with no nav).
+inline bool g_BotsHaveNavData = false;
+
 struct DeathContext {
     FString WeaponName;
     FVector DeathLocation;
@@ -1760,16 +1766,64 @@ void TryBreakDoorOrWall(float Range = 500.f)
         return true;
     }
 
+    // Steer the pawn straight toward a world location with raw movement input. Used as the
+    // fallback when the server has no nav mesh, so MoveToActor/MoveToLocation (which need nav
+    // path following) would otherwise leave the bot running in place. Horizontal only -- the
+    // movement component handles ground following / gravity.
+    void DirectMoveToward(FVector Dest, float Scale = 1.f)
+    {
+        if (!Pawn || Dest.IsZero())
+            return;
+        FVector Loc = Pawn->K2_GetActorLocation();
+        FVector Dir = Dest - Loc;
+        Dir.Z = 0.f;
+        float LenSq = (Dir.X * Dir.X) + (Dir.Y * Dir.Y);
+        if (LenSq < 1.f)
+            return;
+        float Len = sqrtf(LenSq);
+        Dir.X /= Len;
+        Dir.Y /= Len;
+        Pawn->AddMovementInput(Dir, Scale, true);
+    }
+
     void MoveToActorThrottled(AActor* Target, float AcceptanceRadius, float Cooldown = 0.55f)
     {
-        if (!Target || !PC || !CanIssueMoveCommand(Cooldown))
+        if (!Target || !PC || !Pawn)
+            return;
+
+        if (!g_BotsHaveNavData)
+        {
+            // No nav mesh on this build -- path-following MoveToActor is a no-op, so drive the
+            // pawn directly toward the target every frame instead. The action handlers call us
+            // each frame (not just on the think pass), so this produces smooth movement.
+            FVector TLoc = Target->K2_GetActorLocation();
+            FVector Loc = Pawn->K2_GetActorLocation();
+            FVector Flat = TLoc - Loc; Flat.Z = 0.f;
+            if (((Flat.X * Flat.X) + (Flat.Y * Flat.Y)) > (AcceptanceRadius * AcceptanceRadius))
+                DirectMoveToward(TLoc);
+            return;
+        }
+
+        if (!CanIssueMoveCommand(Cooldown))
             return;
         PC->MoveToActor(Target, AcceptanceRadius, true, false, true, nullptr, true);
     }
 
     void MoveToLocationThrottled(FVector Dest, float AcceptanceRadius, float Cooldown = 0.55f)
     {
-        if (!PC || Dest.IsZero() || !CanIssueMoveCommand(Cooldown))
+        if (!PC || !Pawn || Dest.IsZero())
+            return;
+
+        if (!g_BotsHaveNavData)
+        {
+            FVector Loc = Pawn->K2_GetActorLocation();
+            FVector Flat = Dest - Loc; Flat.Z = 0.f;
+            if (((Flat.X * Flat.X) + (Flat.Y * Flat.Y)) > (AcceptanceRadius * AcceptanceRadius))
+                DirectMoveToward(Dest);
+            return;
+        }
+
+        if (!CanIssueMoveCommand(Cooldown))
             return;
         PC->MoveToLocation(Dest, AcceptanceRadius, true, false, false, true, nullptr, true);
     }
@@ -2489,15 +2543,18 @@ public:
             }
 
             if (!bot->TargetDropZone.IsZero()) {
-                FRotator TargetRot = Math->FindLookAtRotation(BotPos, bot->TargetDropZone);
-                TargetRot.Pitch = -80.f;
-                TargetRot.Roll = 0.f;
-                bot->SetLookRotation(TargetRot);
+                // Steer toward the drop zone. Feeding the steep look-at rotation (pitch -80)
+                // straight into AddMovementInput points the input vector nearly straight down,
+                // so the bot barely tracks horizontally and just freefalls. Drive the
+                // horizontal direction toward the target directly (full magnitude) and only
+                // use the steep pitch for the camera/look so they visibly dive toward their POI.
+                FRotator LookRot = Math->FindLookAtRotation(BotPos, bot->TargetDropZone);
+                bot->SetLookRotation(FRotator(-65.f, LookRot.Yaw, 0.f));
 
-                FVector Forward = UKismetMathLibrary::GetForwardVector(TargetRot);
-                bot->Pawn->AddMovementInput(Forward, 1.f, true);
-
-                bot->MoveToLocationThrottled(bot->TargetDropZone, 300.f, 0.8f);
+                FVector ToTarget = bot->TargetDropZone - BotPos;
+                ToTarget.Z = 0.f;
+                ToTarget = ToTarget.Normalize();
+                bot->Pawn->AddMovementInput(ToTarget, 1.f, true);
             }
         }
         else if (bot->BotState == EBotState::Gliding) {
@@ -2520,11 +2577,13 @@ public:
                 bot->SetLookRotation(TargetRot);
 
                 if (Dist > 500.f) {
-                    FVector Forward = bot->Pawn->GetActorForwardVector();
-                    bot->Pawn->AddMovementInput(Forward, 0.8f, true);
+                    // Glide straight at the target horizontally instead of trusting the pawn's
+                    // (async-updated) facing, so they actually close on the POI under canopy.
+                    FVector ToTarget = bot->TargetDropZone - BotPos;
+                    ToTarget.Z = 0.f;
+                    ToTarget = ToTarget.Normalize();
+                    bot->Pawn->AddMovementInput(ToTarget, 1.f, true);
                 }
-
-                bot->MoveToLocationThrottled(bot->TargetDropZone, 200.f, 0.8f);
             }
         }
     }
@@ -2714,6 +2773,7 @@ namespace PlayerBots {
         if (!Nav)
             return false;
 
+        g_BotsHaveNavData = true;
         int assigned = 0;
         for (size_t i = 0; i < PlayerBotArray.size(); i++)
         {
