@@ -297,6 +297,27 @@ namespace Tick {
 		if (Driver->ReplicationDriver) // only report the game net driver, not beacons
 			LogJoinDiagnostics(Driver, GameMode, GameState);
 
+		// The warmup pawn spawn can fail on its single ServerReadyToStartMatch
+		// attempt (World->NetDriver / PlayerState / GameState->MapInfo not ready yet,
+		// see TryManualWarmupSpawn's early guards), which leaves the player with no
+		// pawn forever -- and the Setup->Warmup advance below needs a pawn
+		// (HasReadyHumanPlayer). Retry the spawn from the tick (throttled ~1s) for any
+		// finished-loading controller that still has no pawn, until it succeeds.
+		{
+			static float NextWarmupSpawnRetry = 0.f;
+			float NowRetry = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+			if (NowRetry >= NextWarmupSpawnRetry)
+			{
+				NextWarmupSpawnRetry = NowRetry + 1.0f;
+				for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
+				{
+					AFortPlayerControllerAthena* PC = GameMode->AlivePlayers[i];
+					if (PC && !PC->Pawn && PC->bHasServerFinishedLoading)
+						PC::TryManualWarmupSpawn(PC, "tick warmup retry");
+				}
+			}
+		}
+
 		// Advance the match out of Setup once a human is fully ready. The native
 		// ServerReadyToStartMatch (which normally drives Setup -> Warmup) is skipped
 		// to avoid the unsafe aircraft startup, so the Athena GamePhase otherwise
