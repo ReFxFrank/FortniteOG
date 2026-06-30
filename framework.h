@@ -1063,6 +1063,13 @@ inline void SanitizeWorldStreamingLevels(const char* Reason)
 	if (Globals::bEventEnabled)
 		return;
 
+	// When the real aircraft phase is enabled we must NOT remove these streaming levels:
+	// they include Apollo_Nav_Gameplay (navmesh) and other map data the native flight-path
+	// init and bot navigation need. The upstream OGS reference never strips them and its
+	// bus works. Stripping was a workaround for the old /MD CRT crash, now fixed.
+	if (!Globals::bSkipUnsafeAircraftPhase)
+		return;
+
 	UWorld* World = UWorld::GetWorld();
 	if (!World)
 		return;

@@ -45,6 +45,12 @@ namespace GameMode {
 		if (!Playlist || Globals::bEventEnabled)
 			return;
 
+		// With the real aircraft phase on, keep the playlist's additional levels -- the
+		// native flight-path/aircraft startup relies on them. Only strip them in the
+		// no-aircraft startup that needed the streaming-hang workaround.
+		if (!Globals::bSkipUnsafeAircraftPhase)
+			return;
+
 		if (Globals::Automatics)
 		{
 			if (Playlist->AdditionalLevels.Num() > 0 || Playlist->AdditionalLevelsServerOnly.Num() > 0)

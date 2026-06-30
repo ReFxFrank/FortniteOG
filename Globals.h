@@ -13,7 +13,11 @@ namespace Globals {
 	bool bAdminPanelEnabled = true;
 
 	bool bUseLegacyAI_MANG = true;
-	bool bSkipUnsafeAircraftPhase = true;
+	// false = run the real native aircraft/battle-bus phase (like the upstream OGS
+	// reference). When false we stop stripping the flight/nav streaming levels and stop
+	// skipping ReadyToStartMatchOG, so the engine builds a real flight path and the bus
+	// flies. Set back to true to fall straight back to the no-aircraft instant drop.
+	bool bSkipUnsafeAircraftPhase = false;
 
 	bool LateGame = false;
 	bool Automatics = true;

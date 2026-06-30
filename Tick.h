@@ -358,7 +358,9 @@ namespace Tick {
 		{
 			static float NextWarmupSpawnRetry = 0.f;
 			float NowRetry = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-			if (NowRetry >= NextWarmupSpawnRetry)
+			// Native aircraft mode spawns the warmup pawn itself; only run the manual
+			// retry in the no-aircraft startup.
+			if (GameMode::ShouldForceNoAircraftStartup() && NowRetry >= NextWarmupSpawnRetry)
 			{
 				NextWarmupSpawnRetry = NowRetry + 1.0f;
 				for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
@@ -379,7 +381,8 @@ namespace Tick {
 		// Warmup with a fresh countdown; the existing logic then runs the countdown,
 		// fills bots, and on expiry calls StartAircraftPhase -> no-aircraft fallback,
 		// which skydives the player in and begins SafeZones.
-		if (GameState->GamePhase == EAthenaGamePhase::Setup
+		if (GameMode::ShouldForceNoAircraftStartup()
+			&& GameState->GamePhase == EAthenaGamePhase::Setup
 			&& GameMode::HasReadyHumanPlayer(GameMode))
 		{
 			EAthenaGamePhase OldPhase = GameState->GamePhase;
@@ -395,9 +398,13 @@ namespace Tick {
 			Log("Advanced game phase Setup -> Warmup (human ready); match starts after warmup.");
 		}
 
-		GameMode::KeepWarmupUntilHumanReady(GameMode, GameState, "TickFlush");
+		// In native aircraft mode the engine drives the warmup->aircraft progression;
+		// our warmup-hold/early-start would fight it, so only run them in no-aircraft mode.
+		if (GameMode::ShouldForceNoAircraftStartup())
+			GameMode::KeepWarmupUntilHumanReady(GameMode, GameState, "TickFlush");
 
-		if (GameState->GamePhase == EAthenaGamePhase::Warmup
+		if (GameMode::ShouldForceNoAircraftStartup()
+			&& GameState->GamePhase == EAthenaGamePhase::Warmup
 			&& GameMode::HasReadyHumanPlayer(GameMode)
 			&& (GameMode->AlivePlayers.Num() + GameMode->AliveBots.Num()) >= Globals::MinPlayersForEarlyStart
 			&& GameState->WarmupCountdownEndTime > UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 10.f) {
@@ -466,7 +473,11 @@ namespace Tick {
 			}
 		}
 
-		if (GameState->WarmupCountdownEndTime - UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) <= 0 && GameState->GamePhase == EAthenaGamePhase::Warmup)
+		// Only force the aircraft phase on warmup expiry in no-aircraft mode. In native
+		// mode the engine's own warmup timer triggers StartAircraftPhase (our hook still
+		// intercepts it) -- forcing it here too would double-trigger the phase.
+		if (GameMode::ShouldForceNoAircraftStartup()
+			&& GameState->WarmupCountdownEndTime - UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) <= 0 && GameState->GamePhase == EAthenaGamePhase::Warmup)
 		{
 			if (GameMode::HasReadyHumanPlayer(GameMode))
 			{
