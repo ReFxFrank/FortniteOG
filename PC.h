@@ -464,6 +464,23 @@ namespace PC {
 			PC->MyFortPawn->SetShield(0);
 		}
 
+		// Boarding put the client into the bus camera via ClientEnterAircraft and nothing
+		// ever told it to leave -- so the client stays locked in the aircraft view with no
+		// control over the skydiving pawn (can't steer, can't deploy the glider). Exit the
+		// aircraft on the client and re-hand it the fresh pawn so input/control transfers
+		// to the skydiver, mirroring what the native deploy would do.
+		if (Comp)
+			Comp->CurrentAircraft = nullptr;
+		if (PC->PlayerState)
+			((AFortPlayerStateZone*)PC->PlayerState)->ServerSetInAircraft(false);
+		if (Comp)
+			Comp->ClientExitAircraft();
+		if (PC->MyFortPawn)
+		{
+			PC->ClientRestart(PC->MyFortPawn);
+			PC->ClientRetryClientRestart(PC->MyFortPawn);
+		}
+
 		GameState->OnRep_SafeZoneIndicator();
 		GameState->OnRep_SafeZonePhase();
 	}
