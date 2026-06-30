@@ -994,17 +994,28 @@ namespace GameMode {
 		if (Globals::LateGame || Globals::bCreativeEnabled || !GameMode || !GameState)
 			return;
 
+		// Seat each controller exactly once per match. IsInAircraft() does not reliably
+		// report our manual seating back as true, so guarding on it re-issued
+		// ClientEnterAircraft every tick -- which floods the log AND keeps resetting the
+		// client's ride each frame so it never settles. Track who we've boarded instead.
+		static std::set<void*> s_BoardedPCs;
+
 		AFortAthenaAircraft* Bus = GameState->GetAircraft(0);
 		if (!Bus)
+		{
+			// No live bus (pre-aircraft or post-drop): forget seating so a fresh match
+			// boards again.
+			s_BoardedPCs.clear();
 			return;
+		}
 
 		for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
 		{
 			AFortPlayerControllerAthena* HumanPC = GameMode->AlivePlayers[i];
 			if (!HumanPC || (HumanPC->PlayerState && HumanPC->PlayerState->bIsABot))
 				continue;
-			if (HumanPC->IsInAircraft())
-				continue; // already aboard
+			if (s_BoardedPCs.count(HumanPC))
+				continue; // already seated this match
 
 			UFortControllerComponent_Aircraft* AircraftComp = HumanPC->GetAircraftComponent();
 			if (AircraftComp)
@@ -1015,6 +1026,7 @@ namespace GameMode {
 			if (HumanPC->PlayerState)
 				((AFortPlayerStateZone*)HumanPC->PlayerState)->ServerSetInAircraft(true);
 
+			s_BoardedPCs.insert(HumanPC);
 			Log("Boarded human player onto the battle bus.");
 		}
 	}
