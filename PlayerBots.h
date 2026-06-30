@@ -2850,13 +2850,35 @@ namespace PlayerBots {
         bot->PC->Blackboard->SetValueAsEnum(Name1, (uint8)EAthenaGamePhaseStep::Warmup);
         bot->PC->Blackboard->SetValueAsEnum(Name2, (uint8)EAthenaGamePhase::Warmup);
 
+        // MainNavData is frequently left null on the dedicated server even though the baked
+        // RecastNavMesh from Apollo_Nav_Gameplay registered into NavDataSet -- so every bot
+        // logs "No NavData" and the native AI strains trying to path nav-less bots (a likely
+        // contributor to the aircraft-phase freezes). If the main nav data isn't assigned but
+        // a nav data set exists, adopt the first registered nav data as the main one.
+        auto NavSys = (UNavigationSystemV1*)UWorld::GetWorld()->NavigationSystem;
+        if (NavSys && !NavSys->MainNavData && NavSys->NavDataSet.Num() > 0)
+        {
+            NavSys->MainNavData = NavSys->NavDataSet[0];
+            static bool bLoggedNavAdopt = false;
+            if (!bLoggedNavAdopt)
+            {
+                Log("Adopted NavDataSet[0] as MainNavData (bots can now path).");
+                bLoggedNavAdopt = true;
+            }
+        }
+
         bot->PC->PathFollowingComponent->MyNavData = ((UAthenaNavSystem*)UWorld::GetWorld()->NavigationSystem)->MainNavData;
         bot->PC->PathFollowingComponent->OnNavDataRegistered(((UAthenaNavSystem*)UWorld::GetWorld()->NavigationSystem)->MainNavData);
         if (((UAthenaNavSystem*)UWorld::GetWorld()->NavigationSystem)->MainNavData) {
             //Log("NavData!");
         }
         else {
-            Log("No NavData!");
+            static bool bLoggedNoNav = false;
+            if (!bLoggedNoNav)
+            {
+                Log("No NavData! (NavDataSet empty -- nav mesh not registered yet)");
+                bLoggedNoNav = true;
+            }
         }
 
         bot->PlayerState->OnRep_CharacterData();
