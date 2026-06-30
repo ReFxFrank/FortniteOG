@@ -434,10 +434,30 @@ namespace PC {
 		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 
 		auto PC = (AFortPlayerControllerAthena*)Comp->GetOwner();
+
+		// Capture where to drop from BEFORE RestartPlayer. RestartPlayer respawns the pawn
+		// at a ground PlayerStart on the spawn island, so BeginSkydiving then leaves the
+		// player skydiving ON THE GROUND -- stuck, unable to move or deploy a glider. We
+		// relocate the fresh pawn up to the bus the player is riding so they actually fall.
+		// (RestartPlayer can clear CurrentAircraft, hence reading it first.)
+		AActor* Bus = Comp ? (AActor*)Comp->CurrentAircraft : nullptr;
+		if (!Bus && GameState)
+			Bus = (AActor*)GameState->GetAircraft(0);
+		FVector DropLocation{};
+		bool bHasDrop = false;
+		if (Bus)
+		{
+			DropLocation = Bus->K2_GetActorLocation();
+			DropLocation.Z -= 250.f; // just under the bus, so we don't spawn inside its mesh
+			bHasDrop = true;
+		}
+
 		UWorld::GetWorld()->AuthorityGameMode->RestartPlayer(PC);
 
 		if (PC->MyFortPawn)
 		{
+			if (bHasDrop)
+				PC->MyFortPawn->K2_SetActorLocation(DropLocation, false, nullptr, true);
 			PC->ClientSetRotation(Rotation, true);
 			PC->MyFortPawn->BeginSkydiving(true);
 			PC->MyFortPawn->SetHealth(100);
