@@ -688,6 +688,57 @@ namespace GameMode {
 		PC->ForceNetUpdate();
 	}
 
+	static unsigned __int64 g_NoAirFaultRva = 0;
+	static const char* g_NoAirFaultStep = "";
+	static int NoAirFaultFilter(EXCEPTION_POINTERS* ep, const char* step)
+	{
+		g_NoAirFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		g_NoAirFaultStep = step;
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	// Runs the engine-touching steps of the no-aircraft fallback under SEH so a
+	// fault in any one cannot vanish the server and does not stop the others. In
+	// particular JumpToSafeZonePhase assumes flight-path/storm setup we deliberately
+	// skip and can fault -- but the skydive (which actually drops the player in) and
+	// the OnReps (which replicate the phase change to the client) must still run.
+	// No C++ object unwinding in here so __try/__except is legal (C2712).
+	static void RunNoAircraftNative(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState,
+		EAthenaGamePhase OldPhase, bool* JumpOk, bool* SkydiveOk, bool* RepOk)
+	{
+		__try { GameMode->JumpToSafeZonePhase(); *JumpOk = true; }
+		__except (NoAirFaultFilter(GetExceptionInformation(), "JumpToSafeZonePhase")) { *JumpOk = false; }
+
+		__try
+		{
+			for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
+				PutPlayerInFallbackSkydive(GameMode->AlivePlayers[i]);
+
+			for (size_t b = 0; b < PlayerBotArray.size(); b++)
+			{
+				auto PlayerBot = PlayerBotArray[b];
+				if (PlayerBot && PlayerBot->Pawn)
+				{
+					PlayerBot->Pawn->BeginSkydiving(true);
+					PlayerBot->BotState = EBotState::Skydiving;
+				}
+			}
+			*SkydiveOk = true;
+		}
+		__except (NoAirFaultFilter(GetExceptionInformation(), "FallbackSkydive")) { *SkydiveOk = false; }
+
+		__try
+		{
+			GameState->OnRep_Aircraft();
+			GameState->OnRep_GamePhase(OldPhase);
+			GameState->OnRep_SafeZoneIndicator();
+			GameState->OnRep_SafeZonePhase();
+			GameState->ForceNetUpdate();
+			*RepOk = true;
+		}
+		__except (NoAirFaultFilter(GetExceptionInformation(), "OnReps")) { *RepOk = false; }
+	}
+
 	inline void StartNoAircraftFallback(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState, const std::string& Reason)
 	{
 		if (!GameMode || !GameState)
@@ -706,25 +757,16 @@ namespace GameMode {
 		GameState->GamePhaseStep = EAthenaGamePhaseStep::StormForming;
 		GameMode->bFlightPathInitialized = true;
 
-		GameMode->JumpToSafeZonePhase();
+		bool JumpOk = false, SkydiveOk = false, RepOk = false;
+		RunNoAircraftNative(GameMode, GameState, OldPhase, &JumpOk, &SkydiveOk, &RepOk);
 
-		for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
-			PutPlayerInFallbackSkydive(GameMode->AlivePlayers[i]);
-
-		for (auto PlayerBot : PlayerBotArray)
+		if (!JumpOk || !SkydiveOk || !RepOk)
 		{
-			if (!PlayerBot || !PlayerBot->Pawn)
-				continue;
-
-			PlayerBot->Pawn->BeginSkydiving(true);
-			PlayerBot->BotState = EBotState::Skydiving;
+			char buf[256];
+			sprintf_s(buf, "No-aircraft fallback partial (jump=%d skydive=%d rep=%d); last fault in %s at ImageBase+0x%llX -- server kept alive.",
+				JumpOk ? 1 : 0, SkydiveOk ? 1 : 0, RepOk ? 1 : 0, g_NoAirFaultStep, (unsigned long long)g_NoAirFaultRva);
+			LogError(buf);
 		}
-
-		GameState->OnRep_Aircraft();
-		GameState->OnRep_GamePhase(OldPhase);
-		GameState->OnRep_SafeZoneIndicator();
-		GameState->OnRep_SafeZonePhase();
-		GameState->ForceNetUpdate();
 
 		Log(std::string("Skipped native aircraft phase because ") + Reason + ".");
 	}

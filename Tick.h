@@ -267,6 +267,22 @@ namespace Tick {
 		}
 	}
 
+	// SEH-guarded StartAircraftPhase. The warmup->drop transition is driven from the
+	// (otherwise unguarded) warmup-expiry path below. StartNoAircraftFallback guards
+	// its own native steps, but wrap the outer call too so ANY fault in the
+	// transition keeps the server alive and logs an address instead of vanishing.
+	static unsigned __int64 g_AircraftFaultRva = 0;
+	static int AircraftFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_AircraftFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeStartAircraftPhase(AFortGameModeAthena* GM)
+	{
+		__try { GameMode::StartAircraftPhase(GM, 0); return true; }
+		__except (AircraftFaultFilter(GetExceptionInformation())) { return false; }
+	}
+
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
 		if (!Driver)
@@ -402,7 +418,16 @@ namespace Tick {
 		if (GameState->WarmupCountdownEndTime - UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) <= 0 && GameState->GamePhase == EAthenaGamePhase::Warmup)
 		{
 			if (GameMode::HasReadyHumanPlayer(GameMode))
-				GameMode::StartAircraftPhase(GameMode, 0);
+			{
+				static bool bLoggedAircraftFault = false;
+				if (!SafeStartAircraftPhase(GameMode) && !bLoggedAircraftFault)
+				{
+					char buf[200];
+					sprintf_s(buf, "StartAircraftPhase FAULTED at ImageBase+0x%llX -- skipped to keep the server alive.", (unsigned long long)g_AircraftFaultRva);
+					LogError(buf);
+					bLoggedAircraftFault = true;
+				}
+			}
 			else
 				GameMode::HoldWarmupCountdown(GameMode, GameState, 30.f, "waiting for player spawn");
 		}
