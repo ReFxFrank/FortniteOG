@@ -1027,7 +1027,12 @@ namespace GameMode {
 				((AFortPlayerStateZone*)HumanPC->PlayerState)->ServerSetInAircraft(true);
 
 			s_BoardedPCs.insert(HumanPC);
-			Log("Boarded human player onto the battle bus.");
+			char bbuf[160];
+			sprintf_s(bbuf, "Boarded human onto the bus (comp=%d curAircraft=%d inAir=%d).",
+				AircraftComp ? 1 : 0,
+				(AircraftComp && AircraftComp->CurrentAircraft) ? 1 : 0,
+				HumanPC->IsInAircraft() ? 1 : 0);
+			Log(bbuf);
 		}
 	}
 
