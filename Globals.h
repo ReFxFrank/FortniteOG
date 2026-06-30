@@ -10,7 +10,10 @@ namespace Globals {
 
 	bool bBossesEnabled = false;
 	bool bBotsEnabled = true;
-	bool bAdminPanelEnabled = true;
+	// The "OGS Test Panel" debug window. Off by default -- it only exposes dev test
+	// commands (bots/speed/water) and isn't needed for normal play. Flip to true to bring
+	// it back for debugging.
+	bool bAdminPanelEnabled = false;
 
 	bool bUseLegacyAI_MANG = true;
 	// false = run the real native aircraft/battle-bus phase (like the upstream OGS
