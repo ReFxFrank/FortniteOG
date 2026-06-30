@@ -835,6 +835,35 @@ namespace GameMode {
 		__except (NoAirFaultFilter(GetExceptionInformation(), "OnReps")) { *RepOk = false; }
 	}
 
+	static bool SafeStartMatchOnly(AFortGameModeAthena* GameMode)
+	{
+		__try { GameMode->StartMatch(); return true; }
+		__except (NoAirFaultFilter(GetExceptionInformation(), "StartMatch(bus)")) { return false; }
+	}
+
+	// Flip the GameMode MatchState to InProgress exactly once. The client's "WAITING FOR
+	// PLAYERS" camera -- and the input lock that comes with it -- is keyed off MatchState,
+	// NOT the Athena GamePhase we drive. Because ReadyToStartMatch returns false to block
+	// the unsafe native startup, the match otherwise never starts, so the player never
+	// gets control of their pawn (in warmup OR after deploying from the bus). Unlike the
+	// no-aircraft fallback we do NOT JumpToSafeZonePhase -- the real bus drives its own
+	// phases. Latched via g_OGSMatchStarted; SEH-guarded since StartMatch ->
+	// HandleMatchHasStarted is native and can fault.
+	inline void EnsureMatchInProgress(AFortGameModeAthena* GameMode)
+	{
+		if (g_OGSMatchStarted || !GameMode)
+			return;
+		g_OGSMatchStarted = true;
+		if (!SafeStartMatchOnly(GameMode))
+		{
+			char buf[176];
+			sprintf_s(buf, "StartMatch FAULTED at ImageBase+0x%llX -- player control may be limited.", (unsigned long long)g_NoAirFaultRva);
+			LogError(buf);
+		}
+		else
+			Log("Started match (MatchState -> InProgress) so the player gains control.");
+	}
+
 	inline void StartNoAircraftFallback(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState, const std::string& Reason)
 	{
 		if (!GameMode || !GameState)
@@ -882,9 +911,20 @@ namespace GameMode {
 	}
 
 	static __int64 (*StartAircraftPhaseOG)(AFortGameModeAthena* GameMode, char a2) = nullptr;
+	inline bool g_RealBusLaunched = false;
 	__int64 StartAircraftPhase(AFortGameModeAthena* GameMode, char a2)
 	{
 		Log("StartAircraftPhase hook called.");
+
+		// Once the real bus has actually launched, ignore any re-entrant StartAircraftPhase
+		// (e.g. EnsureMatchInProgress -> StartMatch -> HandleMatchHasStarted can call it
+		// again) so we never spawn a second bus. Early-return paths below never set this,
+		// so blocked/retry cases still get to try again.
+		if (g_RealBusLaunched)
+		{
+			Log("StartAircraftPhase re-entered after the bus already launched; ignoring.");
+			return 0;
+		}
 
 		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 		if (!Globals::LateGame && !Globals::bCreativeEnabled && !HasReadyHumanPlayer(GameMode))
@@ -979,6 +1019,7 @@ namespace GameMode {
 		// Human players are boarded onto the bus from the tick (BoardHumansOntoBus) rather
 		// than here -- GetAircraft(0) is often still null the instant StartAircraftPhaseOG
 		// returns, so a one-shot board here would silently miss.
+		g_RealBusLaunched = true; // latch: real bus is committed; block any re-entrant call
 		return StartAircraftPhaseOG(GameMode, a2);
 	}
 

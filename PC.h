@@ -179,6 +179,21 @@ namespace PC {
 		PC->ClientRestart(SpawnedPawn);
 		PC->ClientRetryClientRestart(SpawnedPawn);
 
+		// Pull the client out of the "WAITING FOR PLAYERS" warmup camera so it actually
+		// controls the spawned pawn instead of ghosting/free-camming on the island. The
+		// possession alone leaves the client in its waiting/spectator state -- clearing the
+		// waiting flags and forcing ClientGotoState("Playing") is what hands control over
+		// (same handshake the no-aircraft fallback uses).
+		PC->bPlayerIsWaiting = false;
+		if (PC->PlayerState)
+		{
+			PC->PlayerState->bIsSpectator = false;
+			PC->PlayerState->bOnlySpectator = false;
+			PC->PlayerState->ForceNetUpdate();
+		}
+		static FName WarmupPlayingState = UKismetStringLibrary::Conv_StringToName(L"Playing");
+		PC->ClientGotoState(WarmupPlayingState);
+
 		if (AddToAlivePlayers && GameState->PlayersLeft <= 0)
 			AddToAlivePlayers(GameModeAthena, PC);
 
@@ -432,6 +447,7 @@ namespace PC {
 	inline void ServerAttemptAircraftJump(UFortControllerComponent_Aircraft* Comp, FRotator Rotation)
 	{
 		AFortGameStateAthena* GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+		AFortGameModeAthena* GM = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
 
 		auto PC = (AFortPlayerControllerAthena*)Comp->GetOwner();
 
@@ -452,7 +468,31 @@ namespace PC {
 			bHasDrop = true;
 		}
 
-		UWorld::GetWorld()->AuthorityGameMode->RestartPlayer(PC);
+		// THE control fix: the match never went InProgress (ReadyToStartMatch returns false
+		// to block the unsafe native startup), so MatchState stays WaitingToStart and the
+		// client is locked in the "WAITING FOR PLAYERS" camera -- ignoring all input, which
+		// is why the player couldn't move/steer/deploy after jumping. Flip MatchState to
+		// InProgress (once) and clear the waiting/spectator flags so the fresh pawn below is
+		// handed to the client as a *playing* pawn.
+		if (GM)
+			GameMode::EnsureMatchInProgress(GM);
+		PC->bPlayerIsWaiting = false;
+		if (PC->PlayerState)
+		{
+			PC->PlayerState->bIsSpectator = false;
+			PC->PlayerState->bOnlySpectator = false;
+		}
+
+		// Leave the bus camera on the client (boarding entered it via ClientEnterAircraft).
+		if (Comp)
+			Comp->CurrentAircraft = nullptr;
+		if (PC->PlayerState)
+			((AFortPlayerStateZone*)PC->PlayerState)->ServerSetInAircraft(false);
+		if (Comp)
+			Comp->ClientExitAircraft();
+
+		if (GM)
+			GM->RestartPlayer(PC);
 
 		if (PC->MyFortPawn)
 		{
@@ -464,22 +504,21 @@ namespace PC {
 			PC->MyFortPawn->SetShield(0);
 		}
 
-		// Boarding put the client into the bus camera via ClientEnterAircraft and nothing
-		// ever told it to leave -- so the client stays locked in the aircraft view with no
-		// control over the skydiving pawn (can't steer, can't deploy the glider). Exit the
-		// aircraft on the client and re-hand it the fresh pawn so input/control transfers
-		// to the skydiver, mirroring what the native deploy would do.
-		if (Comp)
-			Comp->CurrentAircraft = nullptr;
-		if (PC->PlayerState)
-			((AFortPlayerStateZone*)PC->PlayerState)->ServerSetInAircraft(false);
-		if (Comp)
-			Comp->ClientExitAircraft();
-		if (PC->MyFortPawn)
+		// Drive the client restart handshake and force the client into the Playing state.
+		// Native RestartPlayer does not reliably emit the client RPC in this server-as-client
+		// setup, and ClientGotoState("Playing") is what actually pulls the client out of the
+		// waiting camera -- this mirrors the proven no-aircraft fallback (PutPlayerInFallbackSkydive).
+		if (PC->Pawn)
 		{
-			PC->ClientRestart(PC->MyFortPawn);
-			PC->ClientRetryClientRestart(PC->MyFortPawn);
+			PC->ClientRestart(PC->Pawn);
+			PC->ClientRetryClientRestart(PC->Pawn);
 		}
+		static FName PlayingState = UKismetStringLibrary::Conv_StringToName(L"Playing");
+		PC->ClientGotoState(PlayingState);
+
+		if (PC->Pawn)
+			PC->Pawn->ForceNetUpdate();
+		PC->ForceNetUpdate();
 
 		GameState->OnRep_SafeZoneIndicator();
 		GameState->OnRep_SafeZonePhase();
