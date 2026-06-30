@@ -468,14 +468,10 @@ namespace PC {
 			bHasDrop = true;
 		}
 
-		// THE control fix: the match never went InProgress (ReadyToStartMatch returns false
-		// to block the unsafe native startup), so MatchState stays WaitingToStart and the
-		// client is locked in the "WAITING FOR PLAYERS" camera -- ignoring all input, which
-		// is why the player couldn't move/steer/deploy after jumping. Flip MatchState to
-		// InProgress (once) and clear the waiting/spectator flags so the fresh pawn below is
-		// handed to the client as a *playing* pawn.
-		if (GM)
-			GameMode::EnsureMatchInProgress(GM);
+		// The match is already InProgress by now (StartAircraftPhase started it when the bus
+		// launched -- doing it HERE instead would reset the match back to warmup mid-flight
+		// and flip the client to the loading screen). Just clear the waiting/spectator flags
+		// so the fresh pawn below is handed to the client as a *playing* pawn.
 		PC->bPlayerIsWaiting = false;
 		if (PC->PlayerState)
 		{

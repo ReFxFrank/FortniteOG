@@ -1019,7 +1019,16 @@ namespace GameMode {
 		// Human players are boarded onto the bus from the tick (BoardHumansOntoBus) rather
 		// than here -- GetAircraft(0) is often still null the instant StartAircraftPhaseOG
 		// returns, so a one-shot board here would silently miss.
-		g_RealBusLaunched = true; // latch: real bus is committed; block any re-entrant call
+		g_RealBusLaunched = true; // latch BEFORE StartMatch so any re-entrant call is ignored
+
+		// Start the match now (MatchState -> InProgress) so the client leaves the "WAITING
+		// FOR PLAYERS" camera and accepts input -- this is what gives the player control of
+		// their pawn (in the bus and after deploying). StartMatch's native
+		// HandleMatchHasStarted resets the phase to warmup, but StartAircraftPhaseOG right
+		// below overrides it back to the aircraft phase in the SAME frame, so there's no
+		// mid-flight reset / loading-screen flip (the bug from calling StartMatch at deploy).
+		EnsureMatchInProgress(GameMode);
+
 		return StartAircraftPhaseOG(GameMode, a2);
 	}
 

@@ -413,6 +413,26 @@ namespace Tick {
 			GameState->OnRep_GamePhase(OldPhase);
 			GameState->ForceNetUpdate();
 			Log("Advanced game phase Setup -> Warmup (human ready); match starts after warmup.");
+
+			// Real-bus mode: start the match (MatchState -> InProgress) right as we enter
+			// warmup. The client's "WAITING FOR PLAYERS" camera + input lock is keyed off
+			// MatchState, so until the match starts the player can't move -- this is the
+			// prelobby freecam. StartMatch resets the phase/countdown back to warmup, which is
+			// harmless here (we're entering warmup anyway), so we re-assert our 30s window
+			// right after so the bus still launches on schedule. No-aircraft mode starts the
+			// match later via StartNoAircraftFallback, so skip it there.
+			if (!GameMode::ShouldForceNoAircraftStartup())
+			{
+				GameMode::EnsureMatchInProgress(GameMode);
+				float Now2 = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+				GameState->GamePhase = EAthenaGamePhase::Warmup;
+				GameState->GamePhaseStep = EAthenaGamePhaseStep::Warmup;
+				GameState->WarmupCountdownStartTime = Now2;
+				GameState->WarmupCountdownEndTime = Now2 + 30.f;
+				GameMode->WarmupCountdownDuration = 30.f;
+				GameMode->WarmupEarlyCountdownDuration = 30.f;
+				GameState->ForceNetUpdate();
+			}
 		}
 
 		// In native aircraft mode the engine drives the warmup->aircraft progression;
