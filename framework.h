@@ -610,7 +610,11 @@ inline bool AdjustPickupLocationForWater(FVector& Loc)
 
 AFortPickupAthena* SpawnPickup(UFortItemDefinition* ItemDef, int OverrideCount, int LoadedAmmo, FVector Loc, EFortPickupSourceTypeFlag SourceType, EFortPickupSpawnSource Source, AFortPawn* Pawn = nullptr)
 {
-	const bool bStaticDrop = Source == EFortPickupSpawnSource::PlayerElimination || SourceType == EFortPickupSourceTypeFlag::Container || SourceType == EFortPickupSourceTypeFlag::FloorLoot;
+	// Chest / container loot tosses out with physics (the bTossedFromContainer path
+	// below), matching how a player-dropped item scatters, instead of materializing at
+	// rest. Floor loot and elimination loot stay static -- they are meant to lie where
+	// they fall.
+	const bool bStaticDrop = Source == EFortPickupSpawnSource::PlayerElimination || SourceType == EFortPickupSourceTypeFlag::FloorLoot;
 	bool bSpawnedInWater = !bStaticDrop && AdjustPickupLocationForWater(Loc);
 	auto SpawnedPickup = SpawnActor<AFortPickupAthena>(Loc, {}, nullptr, AFortPickupAthena::StaticClass(), ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	if (!SpawnedPickup)

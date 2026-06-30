@@ -246,6 +246,13 @@ namespace PC {
 			PhantomBoothSpawner::SpawnBooths();
 			Log("setupWorld: booths done");
 
+			// Re-enable the henchmen/spy-base sentry turrets (BP_Spy_Turret), their
+			// spawners, and alarm cameras -- they ship with ticking disabled, and this
+			// helper (previously defined but never called) flips them back on so the
+			// turrets actually track and fire.
+			ReactivateSentryActors();
+			Log("setupWorld: sentry turrets/cameras re-enabled");
+
 			TArray<AActor*> VendingMachinesArray;
 
 			Statics->GetAllActorsOfClass(UWorld::GetWorld(), UObject::FindObject<UClass>("BlueprintGeneratedClass B_Athena_VendingMachine.B_Athena_VendingMachine_C"), &VendingMachinesArray);
