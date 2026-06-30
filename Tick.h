@@ -364,7 +364,12 @@ namespace Tick {
 				for (int32 i = 0; i < GameMode->AlivePlayers.Num(); i++)
 				{
 					AFortPlayerControllerAthena* PC = GameMode->AlivePlayers[i];
-					if (PC && !PC->Pawn && PC->bHasServerFinishedLoading)
+					// No-aircraft mode: always retry. Native mode: let the engine own warmup +
+					// bus, only stepping in as a last-resort net if the player still has no
+					// pawn once the match has reached SafeZones.
+					if (PC && !PC->Pawn && PC->bHasServerFinishedLoading
+						&& (GameMode::ShouldForceNoAircraftStartup()
+							|| GameState->GamePhase >= EAthenaGamePhase::SafeZones))
 						PC::TryManualWarmupSpawn(PC, "tick warmup retry");
 				}
 			}
