@@ -182,6 +182,85 @@ namespace GameMode {
 		}
 	}
 
+	// Spawns the bot manager + mutator + AI goal manager and loads the bot cosmetic
+	// pools. Pulled out of ReadyToStartMatch so it can run under SEH: these object/actor
+	// spawns are exactly the bot init that used to be skipped in no-aircraft startup, and
+	// there is no global crash handler -- a fault here would otherwise kill setup
+	// silently. DoInitBots holds the std::vector work (no __try here, so C2712 is
+	// satisfied); the __try lives only in SafeInitBots.
+	static void DoInitBots(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
+	{
+		auto BotManager = (UFortServerBotManagerAthena*)UGameplayStatics::SpawnObject(UFortServerBotManagerAthena::StaticClass(), GameMode);
+		if (!BotManager)
+		{
+			Log("BotManager is nullptr!");
+			Globals::bBotsEnabled = false;
+			return;
+		}
+
+		GameMode->ServerBotManager = BotManager;
+		GameMode->ServerBotManagerClass = UFortServerBotManagerAthena::StaticClass();
+		BotManager->CachedGameState = GameState;
+		BotManager->CachedGameMode = GameMode;
+
+		if (!GameMode->AIDirector)
+		{
+			// The custom C++ combat AI (FindNearestEnemy / MoveToActor / PawnStartFire)
+			// does not need the AIDirector, so don't disable bots over it -- just note that
+			// the native behavior-tree director is absent.
+			Log("No AIDirector; native bot director absent, custom bot combat will still run.");
+		}
+
+		BotMutator = Globals::bBotsEnabled ? SpawnActor<AFortAthenaMutator_Bots>({}) : nullptr;
+		if (Globals::bBotsEnabled && !BotMutator)
+		{
+			Log("BotMutator spawn failed; disabling custom bots.");
+			Globals::bBotsEnabled = false;
+		}
+		else if (BotMutator)
+		{
+			BotManager->CachedBotMutator = BotMutator;
+			BotMutator->CachedGameMode = GameMode;
+			BotMutator->CachedGameState = GameState;
+
+			if (Globals::bBotsEnabled)
+			{
+				AFortAIGoalManager* GoalManager = SpawnActor<AFortAIGoalManager>({});
+				GameMode->AIGoalManager = GoalManager;
+			}
+		}
+
+		if (Globals::bBotsEnabled)
+		{
+			CIDs.clear();
+			for (auto Path : KnownGoodCIDPaths)
+			{
+				UAthenaCharacterItemDefinition* CID = StaticLoadObject<UAthenaCharacterItemDefinition>(Path);
+				if (CID && CID->HeroDefinition)
+					CIDs.push_back(CID);
+			}
+			Pickaxes = GetAllObjectsOfClass<UAthenaPickaxeItemDefinition>();
+			Backpacks = GetAllObjectsOfClass<UAthenaBackpackItemDefinition>();
+			Gliders = GetAllObjectsOfClass<UAthenaGliderItemDefinition>();
+			Contrails = GetAllObjectsOfClass<UAthenaSkyDiveContrailItemDefinition>();
+			Dances = GetAllObjectsOfClass<UAthenaDanceItemDefinition>();
+		}
+
+		Log("Initialised Bots!");
+	}
+
+	static unsigned __int64 g_BotInitFaultRva = 0;
+	static int BotInitFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_BotInitFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeInitBots(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
+	{
+		__try { DoInitBots(GameMode, GameState); return true; }
+		__except (BotInitFaultFilter(GetExceptionInformation())) { return false; }
+	}
+
 	inline bool (*ReadyToStartMatchOG)(AFortGameModeAthena* GameMode);
 	inline bool ReadyToStartMatch(AFortGameModeAthena* GameMode)
 	{
@@ -373,69 +452,32 @@ namespace GameMode {
 				if (Globals::bEventEnabled) {
 					InitialisedBots = true;
 				}
-				else if (ShouldForceNoAircraftStartup() || !Globals::bBotsEnabled)
+				else if (!Globals::bBotsEnabled)
 				{
 					InitialisedBots = true;
-					Globals::bBotsEnabled = false;
 					GameMode->ServerBotManager = nullptr;
 					GameMode->ServerBotManagerClass = nullptr;
 					GameMode->AISettings = nullptr;
-					Log("Skipped native bot manager initialization to avoid aircraft flight path startup.");
-				}
-				else if (auto BotManager = (UFortServerBotManagerAthena*)UGameplayStatics::SpawnObject(UFortServerBotManagerAthena::StaticClass(), GameMode))
-				{
-					InitialisedBots = true;
-
-					GameMode->ServerBotManager = BotManager;
-					GameMode->ServerBotManagerClass = UFortServerBotManagerAthena::StaticClass();
-					BotManager->CachedGameState = GameState;
-					BotManager->CachedGameMode = GameMode;
-
-					if (!GameMode->AIDirector)
-					{
-						Log("No AIDirector; disabling custom bots before spawning bot mutator.");
-						Globals::bBotsEnabled = false;
-					}
-
-					BotMutator = Globals::bBotsEnabled ? SpawnActor<AFortAthenaMutator_Bots>({}) : nullptr;
-					if (Globals::bBotsEnabled && !BotMutator)
-					{
-						Log("BotMutator spawn failed; disabling custom bots.");
-						Globals::bBotsEnabled = false;
-					}
-					else if (BotMutator)
-					{
-						BotManager->CachedBotMutator = BotMutator;
-						BotMutator->CachedGameMode = GameMode;
-						BotMutator->CachedGameState = GameState;
-
-						if (Globals::bBotsEnabled)
-						{
-							AFortAIGoalManager* GoalManager = SpawnActor<AFortAIGoalManager>({});
-							GameMode->AIGoalManager = GoalManager;
-						}
-					}
-
-					if (Globals::bBotsEnabled) {
-						CIDs.clear();
-						for (auto Path : KnownGoodCIDPaths)
-						{
-							UAthenaCharacterItemDefinition* CID = StaticLoadObject<UAthenaCharacterItemDefinition>(Path);
-							if (CID && CID->HeroDefinition)
-								CIDs.push_back(CID);
-						}
-						Pickaxes = GetAllObjectsOfClass<UAthenaPickaxeItemDefinition>();
-						Backpacks = GetAllObjectsOfClass<UAthenaBackpackItemDefinition>();
-						Gliders = GetAllObjectsOfClass<UAthenaGliderItemDefinition>();
-						Contrails = GetAllObjectsOfClass<UAthenaSkyDiveContrailItemDefinition>();
-						Dances = GetAllObjectsOfClass<UAthenaDanceItemDefinition>();
-					}
-
-					Log("Initialised Bots!");
+					Log("Bots disabled by config; skipped bot manager initialization.");
 				}
 				else
 				{
-					Log("BotManager is nullptr!");
+					// Initialise the bot manager / mutator even in no-aircraft startup. This
+					// is our own SpawnObject/SpawnActor work and does NOT run the native
+					// aircraft flight-path init (that lives in ReadyToStartMatchOG /
+					// StartAircraftPhaseOG, which we still skip; AISettings stays null).
+					// SEH-guarded so a fault during setup disables bots instead of killing the
+					// server -- there is no global crash handler around this path.
+					InitialisedBots = true;
+					if (!SafeInitBots(GameMode, GameState))
+					{
+						char buf[200];
+						sprintf_s(buf, "Bot initialization FAULTED at ImageBase+0x%llX -- disabling bots, server kept alive.", (unsigned long long)g_BotInitFaultRva);
+						LogError(buf);
+						Globals::bBotsEnabled = false;
+						GameMode->ServerBotManager = nullptr;
+						GameMode->ServerBotManagerClass = nullptr;
+					}
 				}
 			}
 
@@ -764,8 +806,11 @@ namespace GameMode {
 				auto PlayerBot = PlayerBotArray[b];
 				if (PlayerBot && PlayerBot->Pawn)
 				{
-					PlayerBot->Pawn->BeginSkydiving(true);
-					PlayerBot->BotState = EBotState::Skydiving;
+					// No aircraft to skydive from -- BeginSkydiving(true) faults here. Drop
+					// the bot straight to the ground/Landed state instead; the combat state
+					// machine (Landed -> Looting -> LookingForPlayers) takes over from there
+					// and never touches the bus/aircraft.
+					PlayerBot->BotState = EBotState::Landed;
 				}
 			}
 			*SkydiveOk = true;

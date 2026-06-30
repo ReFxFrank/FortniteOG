@@ -9,7 +9,7 @@ namespace Globals {
 	bool bEventEnabled = false;
 
 	bool bBossesEnabled = false;
-	bool bBotsEnabled = false;
+	bool bBotsEnabled = true;
 	bool bAdminPanelEnabled = true;
 
 	bool bUseLegacyAI_MANG = true;
@@ -33,6 +33,6 @@ namespace Globals {
 	// MaxBotsToSpawn + 1, which made a bots-off server a 1-slot lobby (only the first
 	// remote player could ever connect).
 	int MaxPlayers = 100;
-	int MaxBotsToSpawn = 0;
+	int MaxBotsToSpawn = 25;
 	int MinPlayersForEarlyStart = 100;
 }

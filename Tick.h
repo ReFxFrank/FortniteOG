@@ -291,6 +291,34 @@ namespace Tick {
 		__except (AircraftFaultFilter(GetExceptionInformation())) { return false; }
 	}
 
+	// SEH-guarded bot spawn + bot AI tick. Bots are newly enabled in the no-aircraft
+	// flow, so treat them as untrusted: a fault inside a single bot's spawn or AI tick
+	// must skip that frame, not vanish the dedicated server. Kept unwinding-free so
+	// __try/__except is legal (C2712); the fault RVA is captured for diagnosis.
+	static unsigned __int64 g_BotFaultRva = 0;
+	static int BotFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_BotFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeBotSpawn(AActor* SpawnLocator)
+	{
+		__try { PlayerBots::SpawnPlayerBots(SpawnLocator); return true; }
+		__except (BotFaultFilter(GetExceptionInformation())) { return false; }
+	}
+	static bool SafeBotTick(AFortGameStateAthena* GameState)
+	{
+		__try
+		{
+			int AliveTotal = (int)PlayerBotArray.size();
+			int BrainBudget = (GameState->GamePhase >= EAthenaGamePhase::SafeZones && GameState->GamePhase < EAthenaGamePhase::EndGame) ? 8 : 5;
+			BotBrain::BeginFrame(AliveTotal, BrainBudget);
+			PlayerBots::Tick();
+			return true;
+		}
+		__except (BotFaultFilter(GetExceptionInformation())) { return false; }
+	}
+
 	void TickFlush(UNetDriver* Driver, float DeltaTime)
 	{
 		if (!Driver)
@@ -398,19 +426,27 @@ namespace Tick {
 			if (BotFillTarget > Globals::MaxBotsToSpawn)
 				BotFillTarget = Globals::MaxBotsToSpawn;
 
+				// Count our custom bots via PlayerBotArray, not only GameMode->AliveBots:
+				// the custom PlayerBots may not register in AliveBots, and capping on
+				// AliveBots alone would let this loop spawn far past MaxBotsToSpawn across
+				// the warmup. Take the larger of the two so native bots still count.
+				int BotCount = (int)PlayerBotArray.size();
+				if ((int)GameMode->AliveBots.Num() > BotCount)
+					BotCount = (int)GameMode->AliveBots.Num();
+
 			if (((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->GamePhase == EAthenaGamePhase::Warmup &&
 				GameMode->AlivePlayers.Num() > 0
 				&& PlayerStarts.Num() > 0
-				&& (GameMode->AlivePlayers.Num() + GameMode->AliveBots.Num()) < MaxPlayers
-				&& GameMode->AliveBots.Num() < BotFillTarget
+				&& (GameMode->AlivePlayers.Num() + BotCount) < MaxPlayers
+				&& BotCount < BotFillTarget
 				&& GameState->WarmupCountdownEndTime > CurrentTime
 				&& CurrentTime >= NextWarmupBotSpawnTime)
 			{
-				int BotsNeeded = BotFillTarget - GameMode->AliveBots.Num();
+				int BotsNeeded = BotFillTarget - BotCount;
 				float SpawnDelay = 0.25f;
-				if (GameMode->AliveBots.Num() > 70)
+				if (BotCount > 70)
 					SpawnDelay = 0.45f;
-				else if (GameMode->AliveBots.Num() > 35)
+				else if (BotCount > 35)
 					SpawnDelay = 0.35f;
 
 				NextWarmupBotSpawnTime = CurrentTime + SpawnDelay;
@@ -418,7 +454,14 @@ namespace Tick {
 
 				if (SpawnLocator && BotsNeeded > 0)
 				{
-					PlayerBots::SpawnPlayerBots(SpawnLocator);
+					static bool bLoggedBotSpawnFault = false;
+					if (!SafeBotSpawn(SpawnLocator) && !bLoggedBotSpawnFault)
+					{
+						char buf[200];
+						sprintf_s(buf, "Bot spawn FAULTED at ImageBase+0x%llX -- skipped to keep the server alive.", (unsigned long long)g_BotFaultRva);
+						LogError(buf);
+						bLoggedBotSpawnFault = true;
+					}
 				}
 			}
 		}
@@ -450,10 +493,14 @@ namespace Tick {
 		}
 
 		if (Globals::bBotsEnabled && !Globals::bEventEnabled) {
-			int AliveTotal = (int)PlayerBotArray.size();
-			int BrainBudget = (GameState->GamePhase >= EAthenaGamePhase::SafeZones && GameState->GamePhase < EAthenaGamePhase::EndGame) ? 8 : 5;
-			BotBrain::BeginFrame(AliveTotal, BrainBudget);
-			PlayerBots::Tick();
+			static bool bLoggedBotTickFault = false;
+			if (!SafeBotTick(GameState) && !bLoggedBotTickFault)
+			{
+				char buf[200];
+				sprintf_s(buf, "Bot tick FAULTED at ImageBase+0x%llX -- skipped this frame to keep the server alive.", (unsigned long long)g_BotFaultRva);
+				LogError(buf);
+				bLoggedBotTickFault = true;
+			}
 		}
 
 		if (Globals::bAdminPanelEnabled) {
