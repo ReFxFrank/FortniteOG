@@ -196,6 +196,26 @@ namespace PC {
 	}
 
 	void (*ServerReadyToStartMatchOG)(AFortPlayerControllerAthena* PC);
+
+	// The native ServerReadyToStartMatch is the real (unsafe) aircraft match-start. With
+	// bSkipUnsafeAircraftPhase=false we call it to get the real flying bus, but it can
+	// intermittently null-deref deep in native startup (seen: ACCESS_VIOLATION reading
+	// 0x288) and hard-crash the dedicated server. Contain it: if native faults, the match
+	// still advances via our tick phase-drivers (Setup->Warmup, manual warmup spawn,
+	// StartAircraftPhase), so a caught fault is recoverable rather than fatal. Kept in a
+	// separate, unwinding-free function so __try/__except is legal (C2712).
+	static unsigned __int64 g_ReadyMatchFaultRva = 0;
+	static int ReadyMatchFaultFilter(EXCEPTION_POINTERS* ep)
+	{
+		g_ReadyMatchFaultRva = (unsigned __int64)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - ImageBase);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	static bool SafeServerReadyToStartMatchOG(AFortPlayerControllerAthena* PC)
+	{
+		__try { ServerReadyToStartMatchOG(PC); return true; }
+		__except (ReadyMatchFaultFilter(GetExceptionInformation())) { return false; }
+	}
+
 	void ServerReadyToStartMatch(AFortPlayerControllerAthena* PC)
 	{
 		Log("ServerReadyToStartMatch Called!");
@@ -214,7 +234,7 @@ namespace PC {
 
 		if (!GameMode || !GameState)
 		{
-			ServerReadyToStartMatchOG(PC);
+			SafeServerReadyToStartMatchOG(PC);
 
 			if (PC && PC->Pawn)
 				MarkServerFinishedLoading(PC, "ServerReadyToStartMatchOG fallback");
@@ -306,7 +326,12 @@ namespace PC {
 			return;
 		}
 
-		ServerReadyToStartMatchOG(PC);
+		if (!SafeServerReadyToStartMatchOG(PC))
+		{
+			char buf[200];
+			sprintf_s(buf, "Native ServerReadyToStartMatch FAULTED at ImageBase+0x%llX -- contained; tick drivers will start the match.", (unsigned long long)g_ReadyMatchFaultRva);
+			LogError(buf);
+		}
 
 		if (PC && PC->Pawn)
 		{
